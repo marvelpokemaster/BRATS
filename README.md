@@ -41,12 +41,18 @@ The pipeline explicitly decouples regional representation from tumor classificat
    - Prediction uncertainty (normalized Shannon entropy)
 5. **Pathology-Aware Loss:** Supervoxel-level loss combining weighted cross-entropy with binary Dice losses on clinical target regions (Whole Tumor, Tumor Core, Enhancing Tumor).
 6. **Voxel Reconstruction & Verification:** Reconstructs continuous 3D segmentation masks from dual-modality supervoxel probability maps with spatial alignment verification.
+7. **Heterogeneous Graph Visualization:** Side-by-side visualization of dual-modality supervoxel graph topology mapped back onto MRI slices, utilizing depth-slab gating and cross-modal correspondence arcs.
+8. **Explainability & Introspection Suite:** 
+   - Non-invasive attention capture via context-manager monkey-patching of PyG `HGTConv`.
+   - Cross-modal reliance and head-specialization analysis.
+   - Attention rollout across heterogeneous paths for end-to-end influence extraction.
+   - Ego-network analysis and voxel-projected attention influx heatmaps.
 
 ---
 
 ## Repository Structure
 
-- [`QoS_HRGN_BraTS.ipynb`](QoS_HRGN_BraTS.ipynb): Complete, end-to-end runnable notebook containing dataset discovery, graph caching, training, validation, testing, voxel reconstruction, and slice visualizations.
+- [`QoS_HRGN_BraTS.ipynb`](QoS_HRGN_BraTS.ipynb): Complete, end-to-end runnable notebook containing dataset discovery, graph caching, training, validation, testing, voxel reconstruction, explainability analysis, and visualizations.
 
 ---
 

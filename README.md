@@ -84,6 +84,7 @@ A bounded k-hop neighborhood around a clinically relevant target node (default: 
 ### 3. Global Relation and Receptive-Field Heatmaps
 - Mean learned gate α by relation type and destination class
 - Mean effective hop by node type, class, and prediction correctness
+- Mean learned gate α on boundary edges (endpoints differ in tumour status) vs interior edges, per relation
 
 ---
 
@@ -98,7 +99,12 @@ A bounded k-hop neighborhood around a clinically relevant target node (default: 
 | + voxel head | `True` | `4` | `True` | `0.5` | Full pipeline |
 | No hop cost | `True` | `4` | `False` | `0.5` | Tests expected-hop penalty importance |
 
+Section 20 of the notebook has a driver cell (`RUN_ABLATIONS = True`) that trains every
+row above plus the no-cross-modal-edge, one-hot-label and `N_SEGMENTS` sweep variants on
+one split and prints a single WT/TC/ET Dice table.
+
 Additional ablations:
+- **Boundary refinement:** `VOXEL_BOUNDARY_WEIGHT = 0` vs `> 0` (auxiliary boundary-map BCE on the voxel head)
 - **Option B:** Structure-aware graph refinement (structural descriptors from the model's own predicted tumour graph)
 - **Option C:** Heterogeneous masked graph reconstruction (auxiliary self-supervised task)
 
@@ -145,6 +151,7 @@ LR = 1e-3
 USE_VOXEL_REFINEMENT = True
 VOXEL_EPOCHS = 40
 VOXEL_BASE_CHANNELS = 32
+VOXEL_BOUNDARY_WEIGHT = 0.5   # auxiliary boundary-map BCE on the voxel head
 
 # Loss
 ET_FOCAL_WEIGHT = 0.5

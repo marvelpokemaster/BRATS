@@ -94,16 +94,41 @@ and four output classes using the internal label mapping above. Crop bounds are
 derived from MRI foreground only; segmentation labels are used only as training
 targets and evaluation ground truth.
 
+### Training protocol and gradient accumulation
+
+Training uses **patient-weighted gradient accumulation**:
+- Each microbatch scales its backward pass by its actual patient count $n_i$.
+- At the optimizer step, accumulated gradients are normalized by the total number
+  of patients $N_{\text{total}} = \sum n_i$ in that accumulation group.
+- This ensures that incomplete final batches or unequal microbatch sizes receive
+  exact per-patient weighting equivalent to a single combined batch.
+- **Loss formulation:** `voxel_loss` supports decoupled per-patient Dice loss
+  (`per_patient_dice=True`), computing spatial intersections and unions per
+  volume before averaging across the batch. For $B=1$ (default), per-patient
+  Dice and global batch Dice are identical; for $B>1$, per-patient reduction
+  ensures exact mathematical linear separability across microbatches.
+- For mixed precision (FP16), gradients are unscaled before normalization and
+  gradient clipping ($L_2 \le 2.0$), preventing scaled-gradient distortion.
+
 The baseline registry keeps `RUN_BASELINES = False` by default. To include the
 U-Net in a baseline run, set `RUN_BASELINES = True` and leave
 `RUN_3D_UNET_BASELINE = True`. Comparative reporting rejects
 `BASELINE_MAX_CASES != 0`; limited-case comparisons require retraining every
-compared model on the same selected subjects. The best validation-Dice
-checkpoint is saved as `baseline_3d_unet_best.pt` under `PERSISTENT_BASE`, and
-its path plus protocol metadata are recorded in
-`fair_baseline_registry.json`. The registry reports WT, TC, and ET Dice, HD95
-in voxel units, sensitivity, precision, and IoU with mean, standard deviation,
-and valid/total counts.
+compared model on the same selected subjects.
+
+### Checkpoints and protocol metadata
+
+The best validation-Dice checkpoint is saved as `baseline_3d_unet_best.pt` under
+`PERSISTENT_BASE`. The checkpoint file contains:
+- `state_dict`: model weights.
+- `protocol`: complete experiment metadata including parameter count, optimizer,
+  learning rate, early stopping patience, best epoch, loss description, device,
+  precision requested and effective, gradient accumulation steps, gradient weighting
+  semantics, split fingerprint, and per-epoch timing/memory metrics.
+
+Its path plus protocol metadata are recorded in `fair_baseline_registry.json`.
+The registry reports WT, TC, and ET Dice, HD95 in voxel units, sensitivity,
+precision, and IoU with mean, standard deviation, and valid/total counts.
 
 U-Net resource settings are configurable in the baseline cell:
 `UNET_BASE_CHANNELS = 8`, `UNET_BATCH_SIZE = 1`,
@@ -113,21 +138,29 @@ CUDA device supports it and otherwise uses FP32; set it to `"off"` for an
 explicit FP32 run or `"fp16"` when BF16 is unavailable but FP16 is desired.
 An explicit `"bf16"` request fails on a CUDA device without BF16 support rather
 than silently changing precision.
-The helper moves the model to the selected device before constructing AdamW,
-applies the configured seed to Python, NumPy, PyTorch, and CUDA RNGs, and
-records requested/effective precision, device, epoch time, and peak allocated
-GPU memory in the checkpoint protocol. These settings do not claim bitwise
-determinism; deterministic algorithms are not enabled by default.
 
-For a target-GPU smoke test in Molab, run:
+### Verification and tests
+
+For unit tests and gradient accumulation checks:
+
+```bash
+python -m unittest test_3d_unet_baseline -v
+```
+
+For a target-GPU smoke test in Molab:
 
 ```bash
 python -m unittest test_3d_unet_baseline.ThreeDUNetBaselineTest.test_cuda_synthetic_smoke
 ```
 
-The test uses a synthetic `(1, 4, 16, 16, 16)` volume, one patient per
-training item, `channels_last_3d=True`, and `precision="auto"`. It prints the
-effective device/precision, elapsed epoch time, and peak allocated memory.
+For an opt-in integration test on a genuine BraTS case (requires an authorized
+environment with downloaded BraTS data; never executed on local development machines):
+
+```bash
+BRATS_REAL_CASE_PATH=/path/to/BraTS2021_00000 \
+BRATS_UNET_CHECKPOINT=/path/to/baseline_3d_unet_best.pt \
+python -m unittest test_3d_unet_baseline.ThreeDUNetBaselineTest.test_opt_in_real_brats_case_pipeline -v
+```
 
 The implemented comparison set is CNN-only, 3D U-Net, GraphSAGE or GAT,
 HGT graph-only, and HGT graph+CNN. nnU-Net and SegResNet remain future-work

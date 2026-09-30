@@ -1,23 +1,30 @@
-"""Training helper for the independent BraTS 3D U-Net baseline.
+"""Training helper and loss functions for the independent BraTS 3D U-Net baseline.
 
 Gradient accumulation uses **patient-weighted** averaging: each patient
 contributes equally to the effective batch gradient regardless of how many
-patients happen to fall into each microbatch.  The loss function is assumed
-to use mean reduction across the batch dimension (the default for
-``F.cross_entropy`` and for the project's ``voxel_loss``).
+patients happen to fall into each microbatch.
 
-Implementation:
-  For each microbatch with ``n_i`` patients and mean-reduced loss ``L_i``,
-  the backward pass receives ``n_i * L_i`` so that the accumulated gradient
-  is ``sum_i  n_i * grad(L_i)``.  At the optimizer step the gradient is
-  divided by ``N_total = sum_i n_i`` (the total number of patients in the
-  accumulation group), producing ``(1/N) * sum_i n_i * grad(L_i)`` which
-  is mathematically equivalent to the gradient of a single mean-reduced
-  loss computed over all ``N_total`` patients simultaneously.
+Mathematical Objective:
+  When a loss function decomposes into per-patient losses
+  L(x, y) = (1/N) * sum_{p=1}^N l(x_p, y_p),
+  accumulating gradients across microbatches of sizes n_1, n_2, ... where
+  sum n_i = N_total requires:
+    1. Each microbatch i with n_i patients computes its mean loss L_i.
+    2. Backward pass receives scaled_loss = n_i * L_i = sum_{p in mb_i} l(x_p, y_p).
+    3. Accumulated gradient = sum_i n_i * grad(L_i) = sum_{p=1}^{N_total} grad(l_p).
+    4. At the optimizer step, the gradient is multiplied by 1 / N_total.
+  This produces (1 / N_total) * sum_{p=1}^{N_total} grad(l_p), which is
+  mathematically and numerically equivalent to the gradient of a single
+  combined batch containing all N_total patients simultaneously.
 
-When all microbatches have the same size this is identical to dividing by
-the number of microbatches; the correction matters only for incomplete
-final microbatches.
+Per-Patient vs. Global Batch Dice:
+  Standard batch-aggregated Dice sums intersections and unions across the entire
+  batch, coupling patients together in the denominator. To ensure exact
+  microbatch equivalence for B > 1, Dice should be computed per-patient
+  (summing spatial dimensions per volume) and then mean-reduced across the
+  batch dimension. The ``per_patient_dice_ce_loss`` helper provided below
+  implements this decoupled objective. When B = 1, per-patient Dice and
+  global batch Dice are identical.
 """
 
 import os
@@ -26,6 +33,62 @@ import time
 
 import numpy as np
 import torch
+import torch.nn.functional as F
+
+
+def per_patient_dice_ce_loss(
+    logits,
+    seg,
+    class_weights=None,
+    dice_weight=1.0,
+    ce_weight=1.0,
+    eps=1e-7,
+):
+    """Compute decoupled per-patient Dice + Cross-Entropy loss for BraTS 4-class segmentation.
+
+    Args:
+        logits: (B, 4, X, Y, Z) unnormalized class logits.
+        seg: (B, X, Y, Z) integer ground truth labels with values 0, 1, 2, 3.
+        class_weights: Optional 1D tensor of class weights for Cross-Entropy.
+        dice_weight: Scalar weight for the Dice loss term.
+        ce_weight: Scalar weight for the Cross-Entropy loss term.
+        eps: Small constant for numerical stability.
+
+    Returns:
+        Scalar loss representing the mean per-patient (Dice + CE) loss across the batch.
+        Guaranteed to decompose linearly across patients:
+        loss(B) = (1 / B) * sum_{p=1}^B loss_p.
+    """
+    ce = F.cross_entropy(logits, seg, weight=class_weights)
+    probs = F.softmax(logits.float(), dim=1)
+
+    # BraTS region definitions
+    p_wt = probs[:, 1:].sum(dim=1)
+    g_wt = (seg > 0).float()
+    p_tc = probs[:, 1] + probs[:, 3]
+    g_tc = ((seg == 1) | (seg == 3)).float()
+    p_et = probs[:, 3]
+    g_et = (seg == 3).float()
+
+    # Sum over spatial dimensions only: (-3, -2, -1) -> preserves batch dimension B
+    spatial_dims = (-3, -2, -1)
+    inter_wt = 2.0 * (p_wt * g_wt).sum(dim=spatial_dims) + eps
+    union_wt = p_wt.sum(dim=spatial_dims) + g_wt.sum(dim=spatial_dims) + eps
+    dice_wt = 1.0 - (inter_wt / union_wt)
+
+    inter_tc = 2.0 * (p_tc * g_tc).sum(dim=spatial_dims) + eps
+    union_tc = p_tc.sum(dim=spatial_dims) + g_tc.sum(dim=spatial_dims) + eps
+    dice_tc = 1.0 - (inter_tc / union_tc)
+
+    inter_et = 2.0 * (p_et * g_et).sum(dim=spatial_dims) + eps
+    union_et = p_et.sum(dim=spatial_dims) + g_et.sum(dim=spatial_dims) + eps
+    dice_et = 1.0 - (inter_et / union_et)
+
+    # Per-patient composite Dice (B,) then averaged across patients
+    per_patient_dice = (dice_wt + dice_tc + dice_et) / 3.0
+    mean_dice = per_patient_dice.mean()
+
+    return dice_weight * mean_dice + ce_weight * ce
 
 
 def train_3d_unet(
@@ -123,8 +186,6 @@ def train_3d_unet(
         pending_targets = []
         pending_count = 0
         accumulated_microbatches = 0
-        # Patient-weighted gradient accumulation: track total patients, not
-        # just microbatch count, so that each patient contributes equally.
         accumulated_patients = 0
 
         def optimizer_step():
@@ -133,11 +194,6 @@ def train_3d_unet(
                 return
             if use_grad_scaler:
                 scaler.unscale_(optimizer)
-            # Normalize by total number of patients across all microbatches
-            # in this accumulation group.  Each microbatch's backward pass
-            # scaled its loss by its own patient count, so accumulated
-            # gradients equal  sum_i  n_i * grad(L_i).  Dividing by N_total
-            # yields the patient-weighted mean gradient.
             gradient_scale = 1.0 / accumulated_patients
             for parameter in model.parameters():
                 if parameter.grad is not None:
@@ -157,7 +213,7 @@ def train_3d_unet(
             nonlocal pending_inputs, pending_targets, pending_count
             if not pending_inputs:
                 return
-            n_patients = pending_count  # actual patient count in this microbatch
+            n_patients = pending_count
             inputs = torch.cat(pending_inputs, dim=0)
             targets = torch.cat(pending_targets, dim=0)
             if channels_last_3d:
@@ -171,10 +227,6 @@ def train_3d_unet(
             ):
                 logits = model(inputs)
                 loss = loss_fn(logits, targets)
-            # Scale by the number of patients in this microbatch so that
-            # each patient's contribution to the accumulated gradient is
-            # independent of how many patients happen to share a microbatch.
-            # The optimizer_step will normalize by accumulated_patients.
             scaled_loss = loss * n_patients
             if use_grad_scaler:
                 scaler.scale(scaled_loss).backward()

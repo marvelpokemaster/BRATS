@@ -28,32 +28,51 @@ def train_3d_unet(
     channels_last_3d=False,
     batch_size=1,
     gradient_accumulation_steps=1,
+    loss_name=None,
 ):
     """Train a supplied 3D U-Net and persist its best validation checkpoint."""
+    train_set = list(train_set)
+    val_set = list(val_set)
+    if epochs < 1:
+        raise ValueError("epochs must be greater than zero")
+    if not train_set:
+        raise ValueError("train_set must not be empty")
+    if not val_set:
+        raise ValueError("val_set must not be empty")
     if batch_size < 1:
         raise ValueError("batch_size must be at least 1")
     if gradient_accumulation_steps < 1:
         raise ValueError("gradient_accumulation_steps must be at least 1")
     device = torch.device(device)
+    if device.type == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("CUDA device requested but CUDA is unavailable")
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-    if torch.cuda.is_available():
+    cuda_seed_applied = device.type == "cuda"
+    if cuda_seed_applied:
         torch.cuda.manual_seed_all(seed)
 
     use_amp = False
     amp_dtype = None
     use_grad_scaler = False
+    precision_fallback_reason = None
     if device.type == "cuda" and precision != "off":
         if precision in ("auto", "bf16") and torch.cuda.is_bf16_supported():
             use_amp = True
             amp_dtype = torch.bfloat16
-        elif precision in ("auto", "fp16"):
+        elif precision == "bf16":
+            raise RuntimeError("BF16 precision requested but unsupported by CUDA device")
+        elif precision == "fp16":
             use_amp = True
             amp_dtype = torch.float16
             use_grad_scaler = True
+        elif precision == "auto":
+            precision_fallback_reason = "BF16 unsupported; using FP32"
         elif precision not in ("auto", "bf16", "fp16"):
             raise ValueError(f"unsupported precision: {precision}")
+    elif device.type != "cuda" and precision not in ("auto", "off"):
+        raise ValueError(f"{precision} precision requires a CUDA device")
     elif precision not in ("auto", "off", "bf16", "fp16"):
         raise ValueError(f"unsupported precision: {precision}")
 
@@ -72,6 +91,7 @@ def train_3d_unet(
     best_epoch = 0
     stale = 0
     epoch_metrics = []
+    optimizer_step_count = 0
 
     for epoch in range(1, epochs + 1):
         epoch_started = time.perf_counter()
@@ -82,10 +102,30 @@ def train_3d_unet(
         pending_inputs = []
         pending_targets = []
         pending_count = 0
-        optimizer_steps = 0
+        accumulated_microbatches = 0
+
+        def optimizer_step():
+            nonlocal accumulated_microbatches, optimizer_step_count
+            if accumulated_microbatches == 0:
+                return
+            if use_grad_scaler:
+                scaler.unscale_(optimizer)
+            gradient_scale = 1.0 / accumulated_microbatches
+            for parameter in model.parameters():
+                if parameter.grad is not None:
+                    parameter.grad.mul_(gradient_scale)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 2.0)
+            if use_grad_scaler:
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
+            accumulated_microbatches = 0
+            optimizer_step_count += 1
 
         def train_pending():
-            nonlocal pending_inputs, pending_targets, pending_count, optimizer_steps
+            nonlocal pending_inputs, pending_targets, pending_count
             if not pending_inputs:
                 return
             inputs = torch.cat(pending_inputs, dim=0)
@@ -100,7 +140,7 @@ def train_3d_unet(
                 enabled=use_amp,
             ):
                 logits = model(inputs)
-                loss = loss_fn(logits, targets) / gradient_accumulation_steps
+                loss = loss_fn(logits, targets)
             if use_grad_scaler:
                 scaler.scale(loss).backward()
             else:
@@ -108,17 +148,10 @@ def train_3d_unet(
             pending_inputs = []
             pending_targets = []
             pending_count = 0
-            optimizer_steps += 1
-            if optimizer_steps % gradient_accumulation_steps == 0:
-                if use_grad_scaler:
-                    scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 2.0)
-                if use_grad_scaler:
-                    scaler.step(optimizer)
-                    scaler.update()
-                else:
-                    optimizer.step()
-                optimizer.zero_grad(set_to_none=True)
+            nonlocal accumulated_microbatches
+            accumulated_microbatches += 1
+            if accumulated_microbatches >= gradient_accumulation_steps:
+                optimizer_step()
 
         for _, meta_path in train_set:
             meta = load_meta(meta_path)
@@ -138,32 +171,27 @@ def train_3d_unet(
 
         if pending_inputs:
             train_pending()
-        if optimizer_steps % gradient_accumulation_steps:
-            if use_grad_scaler:
-                scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 2.0)
-            if use_grad_scaler:
-                scaler.step(optimizer)
-                scaler.update()
-            else:
-                optimizer.step()
-            optimizer.zero_grad(set_to_none=True)
+        optimizer_step()
 
         validation_rows = []
         for _, meta_path in val_set:
             meta = load_meta(meta_path)
             validation_rows.append(evaluate(model, meta))
-        score = (
-            float(
-                np.mean(
-                    [
-                        (row["Dice_WT"] + row["Dice_TC"] + row["Dice_ET"]) / 3
-                        for row in validation_rows
-                    ]
-                )
+        required_metrics = ("Dice_WT", "Dice_TC", "Dice_ET")
+        if not validation_rows:
+            raise ValueError("validation produced no metric rows")
+        for row in validation_rows:
+            if any(metric not in row for metric in required_metrics):
+                raise ValueError("validation metrics must include WT, TC, and ET Dice")
+            if not all(np.isfinite(float(row[metric])) for metric in required_metrics):
+                raise ValueError("validation Dice metrics must be finite")
+        score = float(
+            np.mean(
+                [
+                    np.mean([float(row[metric]) for metric in required_metrics])
+                    for row in validation_rows
+                ]
             )
-            if validation_rows
-            else 0.0
         )
         if score > best_score:
             best_score = score
@@ -200,23 +228,25 @@ def train_3d_unet(
         "epoch_cap": int(epochs),
         "early_stopping_patience": int(patience),
         "best_epoch": int(best_epoch),
-        "loss": "Dice + CE",
+        "loss": loss_name or getattr(loss_fn, "__name__", "supplied_loss_fn"),
         "seed": int(seed),
         "checkpoint": os.path.abspath(checkpoint_path),
         "device": str(device),
         "precision_requested": precision,
         "amp_enabled": use_amp,
         "amp_dtype": str(amp_dtype).replace("torch.", "") if amp_dtype else None,
+        "precision_fallback_reason": precision_fallback_reason,
         "channels_last_3d": bool(channels_last_3d),
         "batch_size": int(batch_size),
         "gradient_accumulation_steps": int(gradient_accumulation_steps),
+        "optimizer_steps": int(optimizer_step_count),
         "epoch_metrics": epoch_metrics,
         "reproducibility": {
             "seed_applied": True,
             "python_random": True,
             "numpy_random": True,
             "torch_random": True,
-            "cuda_random": bool(torch.cuda.is_available()),
+            "cuda_random": cuda_seed_applied,
             "deterministic_algorithms": False,
             "bitwise_determinism_claimed": False,
         },

@@ -111,6 +111,8 @@ U-Net resource settings are configurable in the baseline cell:
 `UNET_CHANNELS_LAST_3D = True`. `auto` uses BF16 autocast when the selected
 CUDA device supports it and otherwise uses FP32; set it to `"off"` for an
 explicit FP32 run or `"fp16"` when BF16 is unavailable but FP16 is desired.
+An explicit `"bf16"` request fails on a CUDA device without BF16 support rather
+than silently changing precision.
 The helper moves the model to the selected device before constructing AdamW,
 applies the configured seed to Python, NumPy, PyTorch, and CUDA RNGs, and
 records requested/effective precision, device, epoch time, and peak allocated

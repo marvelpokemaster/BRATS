@@ -1,4 +1,24 @@
-"""Training helper for the independent BraTS 3D U-Net baseline."""
+"""Training helper for the independent BraTS 3D U-Net baseline.
+
+Gradient accumulation uses **patient-weighted** averaging: each patient
+contributes equally to the effective batch gradient regardless of how many
+patients happen to fall into each microbatch.  The loss function is assumed
+to use mean reduction across the batch dimension (the default for
+``F.cross_entropy`` and for the project's ``voxel_loss``).
+
+Implementation:
+  For each microbatch with ``n_i`` patients and mean-reduced loss ``L_i``,
+  the backward pass receives ``n_i * L_i`` so that the accumulated gradient
+  is ``sum_i  n_i * grad(L_i)``.  At the optimizer step the gradient is
+  divided by ``N_total = sum_i n_i`` (the total number of patients in the
+  accumulation group), producing ``(1/N) * sum_i n_i * grad(L_i)`` which
+  is mathematically equivalent to the gradient of a single mean-reduced
+  loss computed over all ``N_total`` patients simultaneously.
+
+When all microbatches have the same size this is identical to dividing by
+the number of microbatches; the correction matters only for incomplete
+final microbatches.
+"""
 
 import os
 import random
@@ -103,14 +123,22 @@ def train_3d_unet(
         pending_targets = []
         pending_count = 0
         accumulated_microbatches = 0
+        # Patient-weighted gradient accumulation: track total patients, not
+        # just microbatch count, so that each patient contributes equally.
+        accumulated_patients = 0
 
         def optimizer_step():
-            nonlocal accumulated_microbatches, optimizer_step_count
+            nonlocal accumulated_microbatches, accumulated_patients, optimizer_step_count
             if accumulated_microbatches == 0:
                 return
             if use_grad_scaler:
                 scaler.unscale_(optimizer)
-            gradient_scale = 1.0 / accumulated_microbatches
+            # Normalize by total number of patients across all microbatches
+            # in this accumulation group.  Each microbatch's backward pass
+            # scaled its loss by its own patient count, so accumulated
+            # gradients equal  sum_i  n_i * grad(L_i).  Dividing by N_total
+            # yields the patient-weighted mean gradient.
+            gradient_scale = 1.0 / accumulated_patients
             for parameter in model.parameters():
                 if parameter.grad is not None:
                     parameter.grad.mul_(gradient_scale)
@@ -122,12 +150,14 @@ def train_3d_unet(
                 optimizer.step()
             optimizer.zero_grad(set_to_none=True)
             accumulated_microbatches = 0
+            accumulated_patients = 0
             optimizer_step_count += 1
 
         def train_pending():
             nonlocal pending_inputs, pending_targets, pending_count
             if not pending_inputs:
                 return
+            n_patients = pending_count  # actual patient count in this microbatch
             inputs = torch.cat(pending_inputs, dim=0)
             targets = torch.cat(pending_targets, dim=0)
             if channels_last_3d:
@@ -141,15 +171,21 @@ def train_3d_unet(
             ):
                 logits = model(inputs)
                 loss = loss_fn(logits, targets)
+            # Scale by the number of patients in this microbatch so that
+            # each patient's contribution to the accumulated gradient is
+            # independent of how many patients happen to share a microbatch.
+            # The optimizer_step will normalize by accumulated_patients.
+            scaled_loss = loss * n_patients
             if use_grad_scaler:
-                scaler.scale(loss).backward()
+                scaler.scale(scaled_loss).backward()
             else:
-                loss.backward()
+                scaled_loss.backward()
             pending_inputs = []
             pending_targets = []
             pending_count = 0
-            nonlocal accumulated_microbatches
+            nonlocal accumulated_microbatches, accumulated_patients
             accumulated_microbatches += 1
+            accumulated_patients += n_patients
             if accumulated_microbatches >= gradient_accumulation_steps:
                 optimizer_step()
 
@@ -239,6 +275,7 @@ def train_3d_unet(
         "channels_last_3d": bool(channels_last_3d),
         "batch_size": int(batch_size),
         "gradient_accumulation_steps": int(gradient_accumulation_steps),
+        "gradient_weighting": "patient-weighted (each patient contributes equally)",
         "optimizer_steps": int(optimizer_step_count),
         "epoch_metrics": epoch_metrics,
         "reproducibility": {

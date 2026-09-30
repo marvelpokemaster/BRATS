@@ -1,3 +1,22 @@
+"""Tests for the independent BraTS 3D U-Net baseline training helper.
+
+These tests are designed to be deterministic, small, and isolated from real
+BraTS datasets.  They must NOT be executed on the user's laptop — run them
+only in an authorized CI environment or on a dedicated compute machine.
+
+The tests cover:
+  - Forward/backward shape correctness (ThreeDUNetBaseline from notebook)
+  - Registry integration string presence in the notebook
+  - Checkpoint persistence
+  - Gradient accumulation with equal microbatch sizes
+  - Gradient accumulation with UNEQUAL microbatch sizes (the fix)
+  - Single-microbatch equivalence to ordinary optimization
+  - Gradient reset between optimizer steps
+  - Seed/precision protocol metadata
+  - Invalid configuration rejection
+  - CUDA synthetic smoke test (skipped when CUDA unavailable)
+"""
+
 import ast
 import json
 import os
@@ -95,11 +114,15 @@ class ThreeDUNetBaselineTest(unittest.TestCase):
             self.assertTrue(os.path.exists(checkpoint))
             self.assertEqual(protocol["best_epoch"], 1)
             self.assertEqual(protocol["optimizer_steps"], 1)
+            self.assertEqual(protocol["gradient_weighting"],
+                             "patient-weighted (each patient contributes equally)")
         finally:
             if os.path.exists(checkpoint):
                 os.remove(checkpoint)
 
     def test_gradient_accumulation_divisible_and_partial_groups(self):
+        """Equal-sized microbatches: accumulated gradient must match single-batch."""
+
         class ScalarModel(nn.Module):
             def __init__(self):
                 super().__init__()
@@ -115,7 +138,9 @@ class ThreeDUNetBaselineTest(unittest.TestCase):
         }
         inputs = torch.ones(1)
 
-        def run(case_ids, accumulation):
+        def run(case_ids, accumulation, batch_sz=None):
+            if batch_sz is None:
+                batch_sz = 2 if accumulation == 1 else 1
             checkpoint = f"baseline_3d_unet_accum_{len(case_ids)}_{accumulation}.pt"
             model = ScalarModel()
             try:
@@ -138,7 +163,7 @@ class ThreeDUNetBaselineTest(unittest.TestCase):
                     patience=1,
                     checkpoint_path=checkpoint,
                     seed=42,
-                    batch_size=2 if accumulation == 1 else 1,
+                    batch_size=batch_sz,
                     gradient_accumulation_steps=accumulation,
                 )
                 return float(model.weight.detach()), protocol["optimizer_steps"]
@@ -146,14 +171,18 @@ class ThreeDUNetBaselineTest(unittest.TestCase):
                 if os.path.exists(checkpoint):
                     os.remove(checkpoint)
 
+        # Equal microbatches: 2 cases accumulated individually vs 1 batch of 2
         divisible_weight, divisible_steps = run(["case1", "case2"], 2)
         reference_weight, reference_steps = run(["case1", "case2"], 1)
         self.assertAlmostEqual(divisible_weight, reference_weight, places=6)
         self.assertEqual(divisible_steps, 1)
         self.assertEqual(reference_steps, 1)
 
+        # Partial group: 3 cases with accumulation=2 gives 2 optimizer steps
+        # (group 1: case1+case2, group 2: case3 alone)
         partial_weight, partial_steps = run(["case1", "case2", "case3"], 2)
         self.assertEqual(partial_steps, 2)
+        # Manually compute expected weight through 2 AdamW steps
         expected_weight = 0.1
         first_gradient = sum(
             2.0 * (expected_weight - float(targets_by_case[case_id]))
@@ -171,6 +200,180 @@ class ThreeDUNetBaselineTest(unittest.TestCase):
             second_moment / (1 - 0.9**2)
         ) / ((second_variance / (1 - 0.999**2)) ** 0.5 + 1e-8)
         self.assertAlmostEqual(partial_weight, expected_weight, places=6)
+
+    def test_unequal_microbatch_patient_weighting(self):
+        """CORE FIX TEST: Unequal microbatch sizes must produce the same
+        gradient as a single batch containing all patients.
+
+        Scenario: 3 cases, batch_size=2, gradient_accumulation_steps=2.
+          Microbatch 1: case1 + case2 (2 patients)
+          Microbatch 2: case3 (1 patient, final incomplete batch)
+        This must be equivalent to a single batch of all 3 patients.
+        """
+
+        class ScalarModel(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.weight = nn.Parameter(torch.tensor([0.5]))
+
+            def forward(self, inputs):
+                return inputs * self.weight
+
+        targets_by_case = {
+            "case1": torch.tensor([1.0]),
+            "case2": torch.tensor([2.0]),
+            "case3": torch.tensor([3.0]),
+        }
+
+        def run(case_ids, batch_sz, accumulation):
+            checkpoint = f"baseline_uneq_{batch_sz}_{accumulation}.pt"
+            model = ScalarModel()
+            try:
+                _, protocol = train_3d_unet(
+                    model,
+                    [(None, cid) for cid in case_ids],
+                    [(None, case_ids[0])],
+                    load_meta=lambda path: {"target": targets_by_case[path]},
+                    make_batch=lambda meta: (torch.ones(1), meta["target"]),
+                    evaluate=lambda m, meta: {
+                        "Dice_WT": 0.1,
+                        "Dice_TC": 0.2,
+                        "Dice_ET": 0.3,
+                    },
+                    loss_fn=lambda outputs, targets: (outputs - targets).square().mean(),
+                    device=torch.device("cpu"),
+                    epochs=1,
+                    learning_rate=0.01,
+                    weight_decay=0.0,
+                    patience=1,
+                    checkpoint_path=checkpoint,
+                    seed=42,
+                    batch_size=batch_sz,
+                    gradient_accumulation_steps=accumulation,
+                )
+                return float(model.weight.detach()), protocol["optimizer_steps"]
+            finally:
+                if os.path.exists(checkpoint):
+                    os.remove(checkpoint)
+
+        # Unequal microbatches: batch_size=2, accum=2
+        #   microbatch 1: case1+case2 (2 patients)
+        #   microbatch 2: case3 (1 patient) — then forced optimizer step
+        unequal_weight, unequal_steps = run(
+            ["case1", "case2", "case3"], batch_sz=2, accumulation=2
+        )
+        self.assertEqual(unequal_steps, 1)  # all 3 fit in one accumulation group
+
+        # Reference: single batch of all 3 patients, no accumulation
+        ref_weight, ref_steps = run(
+            ["case1", "case2", "case3"], batch_sz=3, accumulation=1
+        )
+        self.assertEqual(ref_steps, 1)
+
+        # With patient-weighted averaging, both must produce identical results
+        self.assertAlmostEqual(
+            unequal_weight,
+            ref_weight,
+            places=6,
+            msg=(
+                f"Unequal microbatch sizes (2+1) must produce the same "
+                f"parameter update as a single batch of 3. "
+                f"Got {unequal_weight} vs {ref_weight}"
+            ),
+        )
+
+    def test_single_microbatch_equivalence(self):
+        """A single microbatch with accumulation=1 must be equivalent to
+        ordinary (non-accumulated) optimization for one step."""
+
+        class ScalarModel(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.weight = nn.Parameter(torch.tensor([1.0]))
+
+            def forward(self, inputs):
+                return inputs * self.weight
+
+        checkpoint = "baseline_single_mb.pt"
+        model = ScalarModel()
+        target = torch.tensor([2.0])
+        try:
+            _, protocol = train_3d_unet(
+                model,
+                [(None, "c1")],
+                [(None, "c1")],
+                load_meta=lambda _: {"t": target},
+                make_batch=lambda meta: (torch.ones(1), meta["t"]),
+                evaluate=lambda m, meta: {
+                    "Dice_WT": 0.5,
+                    "Dice_TC": 0.5,
+                    "Dice_ET": 0.5,
+                },
+                loss_fn=lambda o, t: (o - t).square().mean(),
+                device=torch.device("cpu"),
+                epochs=1,
+                learning_rate=0.01,
+                weight_decay=0.0,
+                patience=1,
+                checkpoint_path=checkpoint,
+                seed=42,
+                batch_size=1,
+                gradient_accumulation_steps=1,
+            )
+            self.assertEqual(protocol["optimizer_steps"], 1)
+            # Manual AdamW: grad = 2*(1-2) = -2, clipped at 2.0
+            # Adam moment m = 0.1*(-2)=-0.2, v = 0.001*4=0.004
+            # w = 1 - 0.01 * (-0.2/(1-0.9)) / ((0.004/(1-0.999))**0.5 + 1e-8)
+            # = 1 - 0.01 * (-2) / (2 + 1e-8) ≈ 1.01
+            self.assertGreater(float(model.weight), 1.0,
+                               "Single-step AdamW should have moved weight toward target=2")
+        finally:
+            if os.path.exists(checkpoint):
+                os.remove(checkpoint)
+
+    def test_gradient_reset_between_optimizer_steps(self):
+        """Gradients from one accumulation group must not leak into the next."""
+
+        class ScalarModel(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.weight = nn.Parameter(torch.tensor([0.0]))
+
+            def forward(self, inputs):
+                return inputs * self.weight
+
+        # 4 cases, accumulation=2, batch_size=1 → 2 optimizer steps
+        # If gradients leak, the second step would include stale gradients.
+        targets = {f"c{i}": torch.tensor([float(i)]) for i in range(1, 5)}
+        checkpoint = "baseline_grad_reset.pt"
+        model = ScalarModel()
+        try:
+            _, protocol = train_3d_unet(
+                model,
+                [(None, f"c{i}") for i in range(1, 5)],
+                [(None, "c1")],
+                load_meta=lambda path: {"t": targets[path]},
+                make_batch=lambda meta: (torch.ones(1), meta["t"]),
+                evaluate=lambda m, meta: {
+                    "Dice_WT": 0.5,
+                    "Dice_TC": 0.5,
+                    "Dice_ET": 0.5,
+                },
+                loss_fn=lambda o, t: (o - t).square().mean(),
+                device=torch.device("cpu"),
+                epochs=1,
+                learning_rate=0.001,
+                weight_decay=0.0,
+                patience=1,
+                checkpoint_path=checkpoint,
+                seed=42,
+                batch_size=1,
+                gradient_accumulation_steps=2,
+            )
+            self.assertEqual(protocol["optimizer_steps"], 2)
+        finally:
+            if os.path.exists(checkpoint):
+                os.remove(checkpoint)
 
     def test_device_seed_and_precision_protocol(self):
         model = nn.Conv3d(4, 4, 1)

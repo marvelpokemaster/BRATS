@@ -84,6 +84,89 @@ Current notebook configuration:
 
 These are configured maxima, not a guarantee that every epoch ran. Report the actual completed/best epoch from the run logs or checkpoints. Voxel-refinement results should only be reported when Stage 2 completed and its held-out evaluation was produced.
 
+## Conventional 3D U-Net baseline
+
+`notebook33_part2.ipynb` includes a selectable independent 3D U-Net baseline
+for the same persisted patient-level split used by the graph baselines. It is a
+lightweight two-level 3D encoder-decoder with max-pooling, transposed-convolution
+upsampling, skip connections, four MRI input channels (T1, T1ce, T2, FLAIR),
+and four output classes using the internal label mapping above. Crop bounds are
+derived from MRI foreground only; segmentation labels are used only as training
+targets and evaluation ground truth.
+
+### Training protocol and gradient accumulation
+
+Training uses **patient-weighted gradient accumulation**:
+- Each microbatch scales its backward pass by its actual patient count $n_i$.
+- At the optimizer step, accumulated gradients are normalized by the total number
+  of patients $N_{\text{total}} = \sum n_i$ in that accumulation group.
+- This ensures that incomplete final batches or unequal microbatch sizes receive
+  exact per-patient weighting equivalent to a single combined batch.
+- **Loss formulation:** `voxel_loss` supports decoupled per-patient Dice loss
+  (`per_patient_dice=True`), computing spatial intersections and unions per
+  volume before averaging across the batch. For $B=1$ (default), per-patient
+  Dice and global batch Dice are identical; for $B>1$, per-patient reduction
+  ensures exact mathematical linear separability across microbatches.
+- For mixed precision (FP16), gradients are unscaled before normalization and
+  gradient clipping ($L_2 \le 2.0$), preventing scaled-gradient distortion.
+
+The baseline registry keeps `RUN_BASELINES = False` by default. To include the
+U-Net in a baseline run, set `RUN_BASELINES = True` and leave
+`RUN_3D_UNET_BASELINE = True`. Comparative reporting rejects
+`BASELINE_MAX_CASES != 0`; limited-case comparisons require retraining every
+compared model on the same selected subjects.
+
+### Checkpoints and protocol metadata
+
+The best validation-Dice checkpoint is saved as `baseline_3d_unet_best.pt` under
+`PERSISTENT_BASE`. The checkpoint file contains:
+- `state_dict`: model weights.
+- `protocol`: complete experiment metadata including parameter count, optimizer,
+  learning rate, early stopping patience, best epoch, loss description, device,
+  precision requested and effective, gradient accumulation steps, gradient weighting
+  semantics, split fingerprint, and per-epoch timing/memory metrics.
+
+Its path plus protocol metadata are recorded in `fair_baseline_registry.json`.
+The registry reports WT, TC, and ET Dice, HD95 in voxel units, sensitivity,
+precision, and IoU with mean, standard deviation, and valid/total counts.
+
+U-Net resource settings are configurable in the baseline cell:
+`UNET_BASE_CHANNELS = 8`, `UNET_BATCH_SIZE = 1`,
+`UNET_GRADIENT_ACCUMULATION_STEPS = 1`, `UNET_PRECISION = "auto"`, and
+`UNET_CHANNELS_LAST_3D = True`. `auto` uses BF16 autocast when the selected
+CUDA device supports it and otherwise uses FP32; set it to `"off"` for an
+explicit FP32 run or `"fp16"` when BF16 is unavailable but FP16 is desired.
+An explicit `"bf16"` request fails on a CUDA device without BF16 support rather
+than silently changing precision.
+
+### Verification and tests
+
+For unit tests and gradient accumulation checks:
+
+```bash
+python -m unittest test_3d_unet_baseline -v
+```
+
+For a target-GPU smoke test in Molab:
+
+```bash
+python -m unittest test_3d_unet_baseline.ThreeDUNetBaselineTest.test_cuda_synthetic_smoke
+```
+
+For an opt-in integration test on a genuine BraTS case (requires an authorized
+environment with downloaded BraTS data; never executed on local development machines):
+
+```bash
+BRATS_REAL_CASE_PATH=/path/to/BraTS2021_00000 \
+BRATS_UNET_CHECKPOINT=/path/to/baseline_3d_unet_best.pt \
+python -m unittest test_3d_unet_baseline.ThreeDUNetBaselineTest.test_opt_in_real_brats_case_pipeline -v
+```
+
+The implemented comparison set is CNN-only, 3D U-Net, GraphSAGE or GAT,
+HGT graph-only, and HGT graph+CNN. nnU-Net and SegResNet remain future-work
+placeholders; no baseline performance is implied until the corresponding
+training run has completed.
+
 ## Evaluation
 
 The notebook evaluates segmentation at voxel level using the standard BraTS regions:

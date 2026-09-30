@@ -1,187 +1,183 @@
 # QoS-HRGN: Heterogeneous Adaptive Graph Learning for BraTS 3D Segmentation
 
-A heterogeneous graph neural network pipeline for multimodal 3D brain tumor segmentation on BraTS 2020 MRI volumes. The pipeline combines modality-specific supervoxel graphs, heterogeneous graph transformers, node-wise learned propagation depth, voxel-level refinement, and multi-channel explainability.
+QoS-HRGN is a multimodal 3D brain-tumor segmentation research pipeline. It represents MRI volumes as heterogeneous supervoxel graphs, applies a Heterogeneous Graph Transformer (HGT) with node-wise adaptive propagation, and optionally refines the graph predictions at voxel resolution.
 
----
+> **Dataset configuration:** The current notebooks target the Kaggle mirror `dschettler8845/brats-2021-task1` (BraTS 2021 Task 1). Dataset discovery in the notebook reported **1,252 complete labeled cases** in the downloaded package. This is the count for that mirror/package, not a claim about every BraTS 2021 challenge release or split.
 
-## Architecture Overview
+## Pipeline at a glance
 
+```text
+BraTS 2021 MRI: T1, T1ce, T2, FLAIR + segmentation
+                         |
+               patient-level data split
+                         |
+        independent 3D SLIC on T1ce and FLAIR
+                         |
+         heterogeneous supervoxel graph
+       (within-modality spatial + cross-modal
+                correspondence edges)
+                         |
+             HGT (2 layers, 4 heads)
+                         |
+       uncertainty-aware adaptive propagation
+             (candidate depths k = 0..4)
+                         |
+           node-wise class prediction
+                         |
+       project graph probabilities to voxels
+                         |
+      optional 3D voxel refinement network
+                         |
+              WT / TC / ET Dice
+                         |
+        diagnostic visualizations / XAI
 ```
-BraTS 3D MRI (T1, T1ce, T2, FLAIR)
-     │
-     ├── T1ce  ──► Modality-Specific 3D SLIC ──► T1ce Supervoxels  ──┐
-     │                                                              │
-     └── FLAIR ──► Modality-Specific 3D SLIC ──► FLAIR Supervoxels ──┤
-                                                                   │
-                                          Heterogeneous Graph Construction
-                                          (spatial + cross-modal correspondence edges)
-                                                                   │
-                                          Residual HGT (2 layers, 4 heads)
-                                                                   │
-                                          Node-Wise Adaptive Hop Propagation
-                                          (shared recurrent, k=0..K_MAX=4,
-                                           uncertainty-conditioned soft mixture)
-                                                                   │
-                                          Per-Node-Type Segmentation Head
-                                                                   │
-                                          Voxel Refinement Head (3D U-Net)
-                                          (breaks supervoxel oracle ceiling)
-                                                                   │
-                                          WT / TC / ET Dice Evaluation
-                                                                   │
-                                          Multi-Channel Explainability
-                                          (Shapley + edge gates + effective hops)
-```
 
-The pipeline explicitly decouples regional representation from tumor classification:
+## Dataset and split
 
-1. **Modality-Specific 3D SLIC Supervoxels:** Regionalizes T1ce and FLAIR volumes independently to preserve distinct tissue boundaries. Each supervoxel summarizes all four MRI modalities (mean, std, 5 quantiles per modality = 28 appearance features) plus 4 geometry features (normalized centroid xyz, log-relative size) = 32 features per node.
+The current data loader uses:
 
-2. **Heterogeneous Multimodal Graph (`HeteroData`):**
-   - **Node Types:** `t1ce`, `flair` (each with its own SLIC partition)
-   - **Intra-Modal Relations:** `("t1ce", "spatial", "t1ce")`, `("flair", "spatial", "flair")` — face-adjacent supervoxels with edge attributes [normalized centroid distance, log-size ratio]
-   - **Cross-Modal Relations:** `("t1ce", "corresponds", "flair")`, `("flair", "corresponds", "t1ce")` — supervoxels that overlap in voxel space, with the same edge attributes
+- **Dataset:** `dschettler8845/brats-2021-task1` via `kagglehub`
+- **Modalities:** T1, T1ce (post-contrast T1), T2, and FLAIR
+- **Labels:** raw BraTS labels 0, 1, 2, and 4, internally mapped to 0, 1, 2, and 3
+- **Case discovery:** recursively locates NIfTI files and retains cases with all four modalities and a segmentation
+- **Case limit:** `MAX_CASES = None`, meaning all complete discovered cases are selected
 
-3. **HGT Backbone:** PyTorch Geometric `HGTConv` (2 layers, 4 heads) processes heterogeneous node features and typed relations with multi-head attention. Residual connections with LayerNorm.
+The split is patient-level and shuffled with `SEED = 42`. The notebook applies a 70% / 15% / remainder split using integer truncation:
 
-4. **Node-Wise Adaptive Hop Propagation:** Instead of fixing the number of propagation stages, the model computes candidate representations at depths k=0,...,K_MAX (default 4) using a single shared recurrent propagation layer. Each node learns a soft distribution β_{v,k} over these depths, conditioned on:
-   - Node embedding at that hop
-   - Prediction uncertainty (normalized Shannon entropy)
-   - Representation change from the preceding hop
-   - Node type (separate selectors for T1ce and FLAIR)
-   
-   The final embedding is a weighted mixture: h_v* = Σ_k β_{v,k} · h_v^{(k)}. An expected-hop regularization term discourages collapse to maximum depth. This lets ET nodes prefer local context while edema nodes may select broader propagation — without assuming every node needs the same receptive field.
+| Partition | Cases (when 1,252 complete cases are discovered) |
+|---|---:|
+| Train | 876 |
+| Validation | 187 |
+| Test | 189 |
+| **Total** | **1,252** |
 
-5. **Adaptive Edge Gating:** Within each propagation step, per-edge messages are gated by α = σ(MLP([h_src, h_dst, edge_attr, cosine_similarity, cross_modal_flag, uncertainty])). This is the model's native edge-importance signal and is exposed for explainability.
+The code asserts that patient IDs do not overlap between partitions. If the number of complete cases differs in another environment or dataset revision, the split counts will differ; use the notebook's printed counts as the run-specific record. The Kaggle mirror is a labeled dataset package; these are notebook-created partitions, not necessarily the official challenge partitions.
 
-6. **Pathology-Aware Loss:** Supervoxel-level loss combining weighted soft cross-entropy with volume-weighted binary Dice losses on clinical target regions (WT, TC, ET), plus optional soft focal loss for ET.
+## Graph representation
 
-7. **Voxel Refinement Head:** A lightweight 3D U-Net (~1M params) that takes 4 MRI modalities + 4 projected node probability maps and refines predictions at full voxel resolution. This breaks the supervoxel oracle ceiling (ET oracle ≈ 0.72 at 15k segments) by discriminating within supervoxels — e.g. splitting ET from NCR/NET using T1ce intensity. Two-stage training: graph model frozen.
+- **Node types:** `t1ce` and `flair`, each produced by its own 3D SLIC partition.
+- **SLIC resolution:** `N_SEGMENTS = 15000` per modality; `COMPACTNESS = 0.3`; `SLIC_ITERS = 10`.
+- **Node features:** 32 values: 28 appearance statistics (mean, standard deviation, and five quantiles for each of four MRI modalities) plus four geometric features (normalized centroid coordinates and log-relative volume).
+- **Spatial edges:** connect face-adjacent supervoxels within a modality.
+- **Correspondence edges:** connect supervoxels from the two modalities that overlap in voxel space.
+- **Fractional labels:** node targets preserve the class proportions within each supervoxel, rather than representing each node only by its majority class.
 
-8. **Connected-Component Post-Processing:** Removes individual small ET islands rather than using a single global volume threshold, preserving large valid ET regions while suppressing spurious detections.
+## Model
 
----
+The graph model uses a two-layer PyTorch Geometric `HGTConv` backbone (hidden dimension 128, four attention heads), followed by uncertainty-aware adaptive propagation. The adaptive component considers candidate propagation depths from 0 through 4 and learns node-specific mixtures rather than imposing one fixed receptive-field depth on every node.
 
-## Explainability
+An adaptive edge gate conditions message weighting on node representations, edge information, similarity, relation type, and prediction uncertainty. HGT supplies relation-aware heterogeneous attention; the adaptive propagation/gating module is the project's proposed adaptation.
 
-Three complementary explanation channels, each answering a different question:
+## Voxel refinement
 
-### 1. Exact Modality Shapley Attribution
-Adapted from Saueressig et al. (DataMod 2020). The four MRI modalities (T1, T1CE, T2, FLAIR) are treated as cooperative-game players. All 2^4 = 16 modality coalitions are evaluated exactly (no neural approximation). Missing modalities are replaced by a 500-node training-background mean; geometry and graph topology remain unchanged. All nodes in a patient graph are perturbed simultaneously because GNN predictions depend on neighbors.
+The pipeline has two training stages:
 
-**Output:** Four-panel violin plots grouped by predicted class × modality × bright/dark intensity, matching the paper's presentation. Positive values support the predicted class; negative values oppose it.
+1. **Stage 1 — graph/node model:** train the heterogeneous graph model and evaluate graph-derived voxel predictions.
+2. **Stage 2 — voxel refinement:** freeze the graph model, project node probabilities into voxel space, combine them with the four MRI channels, and train the voxel refinement head on cropped volumes.
 
-### 2. Labelled Local Heterogeneous Graph
-A bounded k-hop neighborhood around a clinically relevant target node (default: highest-confidence predicted ET). Renders:
-- **Node fill color:** predicted tissue class
-- **Node shape:** circle = T1ce, square = FLAIR
-- **Node size:** prediction confidence
-- **Node border color:** learned effective hop depth
-- **Node labels:** type, ID, predicted class, confidence, effective hop
-- **Edge color:** relation type (spatial vs correspondence)
-- **Edge width/opacity/numeric label:** learned adaptive gate α
+Current notebook configuration:
+- Graph training: `EPOCHS = 100` maximum
+- Voxel refinement: `VOXEL_EPOCHS = 40` maximum
+- Graph early-stopping patience: `EARLY_STOP_PATIENCE = 15`
+- Stage 2 can pause at the configured time budget and resume from its checkpoint.
 
-### 3. Global Relation and Receptive-Field Heatmaps
-- Mean learned gate α by relation type and destination class
-- Mean effective hop by node type, class, and prediction correctness
-- Mean learned gate α on boundary edges (endpoints differ in tumour status) vs interior edges, per relation
+These are configured maxima, not a guarantee that every epoch ran. Report the actual completed/best epoch from the run logs or checkpoints. Voxel-refinement results should only be reported when Stage 2 completed and its held-out evaluation was produced.
 
----
+## Evaluation
 
-## Ablation Structure
+The notebook evaluates segmentation at voxel level using the standard BraTS regions:
 
-| Run | `USE_ADAPTIVE_HOPS` | `HOPS`/`K_MAX` | `USE_VOXEL_REFINEMENT` | `ET_FOCAL_WEIGHT` | What it isolates |
-|---|---|---|---|---|---|
-| HGT only | `False` | `0` | `False` | `0` | No adaptive propagation |
-| Fixed propagation | `False` | `2` | `False` | `0` | Original QoS-HRGN baseline |
-| + focal loss | `False` | `2` | `False` | `0.5` | Focal loss helps close gap to oracle |
-| Adaptive depth | `True` | `4` | `False` | `0.5` | Node-wise learned receptive field |
-| + voxel head | `True` | `4` | `True` | `0.5` | Full pipeline |
-| No hop cost | `True` | `4` | `False` | `0.5` | Tests expected-hop penalty importance |
+- **WT (Whole Tumor):** NCR/NET + ED + ET
+- **TC (Tumor Core):** NCR/NET + ET
+- **ET (Enhancing Tumor):** ET
 
-Section 20 of the notebook has a driver cell (`RUN_ABLATIONS = True`) that trains every
-row above plus the no-cross-modal-edge, one-hot-label and `N_SEGMENTS` sweep variants on
-one split and prints a single WT/TC/ET Dice table.
+| Region | Definition |
+|---|---|
+| WT | Internal classes 1, 2, 3 |
+| TC | Internal classes 1, 3 |
+| ET | Internal class 3 |
 
-Additional ablations:
-- **Boundary refinement:** `VOXEL_BOUNDARY_WEIGHT = 0` vs `> 0` (auxiliary boundary-map BCE on the voxel head)
-- **Option B:** Structure-aware graph refinement (structural descriptors from the model's own predicted tumour graph)
-- **Option C:** Heterogeneous masked graph reconstruction (auxiliary self-supervised task)
+Use the held-out **test** partition for final reported performance. Validation metrics are for model selection and should not be presented as test performance. This README does not hard-code Dice values because they must correspond to the exact completed run, model checkpoint, post-processing configuration, and test split. Include per-region Dice (WT, TC, ET), and clarify whether values are raw or post-processed.
 
----
+## Running the notebooks
 
-## BraTS Label Formulation
+The repository separates the work into two notebooks to support the staged training/checkpoint workflow:
 
-- **Raw Labels:** `0`: Background, `1`: NCR/NET, `2`: ED, `4`: ET
-- **Internal Mapping:**
-  - `0`: Background (BG)
-  - `1`: Necrotic / Non-Enhancing Tumor (NCR/NET)
-  - `2`: Peritumoral Edema (ED)
-  - `3`: Enhancing Tumor (ET)
-- **Evaluation Subregions:**
-  - **WT (Whole Tumor):** Classes 1, 2, 3
-  - **TC (Tumor Core):** Classes 1, 3
-  - **ET (Enhancing Tumor):** Class 3
+1. **`notebook34_part1.ipynb` — Stage 1**
+   - Installs/imports dependencies through the notebook environment.
+   - Downloads/discovers the BraTS 2021 Kaggle dataset.
+   - Builds or loads the graph cache.
+   - Creates the patient-level train/validation/test split.
+   - Trains and evaluates the graph model.
+   - Saves and uploads the Stage 1 checkpoint and run metadata.
 
----
+2. **`notebook33_part2.ipynb` — Stage 2**
+   - Loads and validates the Stage 1 checkpoint and matching split/configuration.
+   - Prepares projected graph-probability maps and MRI crops.
+   - Trains/resumes voxel refinement.
+   - Evaluates graph-only versus graph-plus-voxel-refinement predictions and runs diagnostics.
 
-## Key Configuration
+Run Stage 1 first and wait for the notebook's checkpoint upload/verification to finish before starting Stage 2. Both notebooks require access to the expected cache/checkpoint locations and compatible configuration. A checkpoint from a different split or configuration is intentionally rejected.
+
+### Environment and access
+
+The notebooks are designed for a Python environment with PyTorch, CUDA, PyTorch Geometric, and the listed scientific packages. They also use:
+
+- `kagglehub` for dataset download (configure Kaggle credentials/access as required by Kaggle)
+- Hugging Face Hub for graph-cache/checkpoint persistence when enabled (configure a token with appropriate repository permissions)
+
+Store credentials in environment variables or the runtime's secret manager. **Do not commit Kaggle or Hugging Face tokens to the repository or notebook.**
+
+A full 1,252-case run can be compute-, memory-, storage-, and time-intensive. First validate the workflow with a small `MAX_CASES` value, then restore `MAX_CASES = None` for the full experiment. Make sure the resulting split and checkpoint are from the same run.
+
+## Main configuration
 
 ```python
-# Graph
-N_SEGMENTS = 15000          # SLIC supervoxel count
-COMPACTNESS = 0.3
-NODE_TYPES = ("t1ce", "flair")
-NODE_FEAT_DIM = 32           # 28 appearance + 4 geometry
+# Dataset
+DATASET_SLUG = "dschettler8845/brats-2021-task1"
+MAX_CASES = None
 
-# Model
+# Graph
+N_SEGMENTS = 15000
+COMPACTNESS = 0.3
+SLIC_ITERS = 10
+NODE_TYPES = ("t1ce", "flair")
+NODE_FEAT_DIM = 32
+
+# Graph model
 HIDDEN_DIM = 128
 HEADS = 4
 HGT_LAYERS = 2
-USE_ADAPTIVE_HOPS = True    # node-wise learned propagation depth
-K_MAX = 4                   # candidate depths k=0..4
-HOP_REG_WEIGHT = 0.002      # expected-hop regularization
-
-# Training
-EPOCHS = 100
-BATCH_SIZE = 8
-LR = 1e-3
+USE_ADAPTIVE_HOPS = True
+K_MAX = 4
+EPOCHS = 100                 # maximum graph epochs
 
 # Voxel refinement
 USE_VOXEL_REFINEMENT = True
-VOXEL_EPOCHS = 40
+VOXEL_EPOCHS = 40            # maximum refinement epochs
 VOXEL_BASE_CHANNELS = 32
-VOXEL_BOUNDARY_WEIGHT = 0.5   # auxiliary boundary-map BCE on the voxel head
-
-# Loss
-ET_FOCAL_WEIGHT = 0.5
-FOCAL_GAMMA = 2.0
 ```
 
----
+See the notebook cells for the complete configuration, optional structural refinement and masked-reconstruction settings, checkpoint paths, and diagnostic switches.
 
-## Repository Structure
+## Label mapping
 
-- [`QoS_HRGN_BraTS.ipynb`](QoS_HRGN_BraTS.ipynb): Complete end-to-end runnable notebook containing dataset discovery, graph caching, training, validation, testing, voxel refinement, explainability analysis, and visualizations.
+| Raw label | Internal label | Meaning |
+|---:|---:|---|
+| 0 | 0 | Background |
+| 1 | 1 | NCR/NET |
+| 2 | 2 | Edema (ED) |
+| 4 | 3 | Enhancing Tumor (ET) |
 
----
+## Repository contents
 
-## Dependencies
-
-- Python 3.10+
-- PyTorch & CUDA
-- `torch-geometric`
-- `nibabel`
-- `scikit-image`
-- `matplotlib`
-- `kagglehub`
-- `scipy`
-- `joblib`
-
----
+- `notebook34_part1.ipynb`: Stage 1 graph construction, training, and evaluation.
+- `notebook33_part2.ipynb`: Stage 2 voxel refinement and downstream diagnostics.
+- Other repository files may contain intermediate experiments or artifacts; use the two staged notebooks above as the current workflow.
 
 ## References
 
-- Saueressig, C., Berkley, A., Kang, E., Munbodh, R., & Singh, R. (2020). *Exploring graph-based neural networks for automatic brain tumor segmentation.* DataMod 2020. — SLIC supervoxel construction, k≈15000, quantile features, and SHAP-based modality explainability.
-- Hu, Z., Dong, Y., Wang, K., & Sun, Y. (2020). *Heterogeneous Graph Transformer.* WWW 2020. — HGTConv backbone.
-- BraTS 2020 challenge dataset via Kaggle (`awsaf49/brats20-dataset-training-validation`).
+- Saueressig, C., Berkley, A., Kang, E., Munbodh, R., & Singh, R. (2020). *Exploring Graph-Based Neural Networks for Automatic Brain Tumor Segmentation.* DataMod 2020.
+- Hu, Z., Dong, Y., Wang, K., & Sun, Y. (2020). *Heterogeneous Graph Transformer.* Proceedings of The Web Conference (WWW 2020).
+- BraTS 2021 Task 1 data mirror: `dschettler8845/brats-2021-task1` on Kaggle.

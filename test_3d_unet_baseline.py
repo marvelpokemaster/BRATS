@@ -1,8 +1,10 @@
 import ast
 import json
 import os
+import random
 import unittest
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -70,7 +72,7 @@ class ThreeDUNetBaselineTest(unittest.TestCase):
         try:
             _, protocol = train_3d_unet(
                 TinyModel(),
-                [(None, "case")],
+                [(None, "case1"), (None, "case2")],
                 [(None, "case")],
                 load_meta=lambda _: metadata,
                 make_batch=lambda meta: (meta["inputs"], meta["targets"]),
@@ -87,9 +89,99 @@ class ThreeDUNetBaselineTest(unittest.TestCase):
                 patience=1,
                 checkpoint_path=checkpoint,
                 seed=42,
+                batch_size=2,
+                gradient_accumulation_steps=2,
             )
             self.assertTrue(os.path.exists(checkpoint))
             self.assertEqual(protocol["best_epoch"], 1)
+        finally:
+            if os.path.exists(checkpoint):
+                os.remove(checkpoint)
+
+    def test_device_seed_and_precision_protocol(self):
+        model = nn.Conv3d(4, 4, 1)
+        checkpoint = "baseline_3d_unet_device_test.pt"
+        try:
+            expected_seed = 123
+            random.seed(expected_seed)
+            expected_python = random.random()
+            np.random.seed(expected_seed)
+            expected_numpy = np.random.random()
+            torch.manual_seed(expected_seed)
+            expected_torch = torch.rand(1).item()
+            random.seed(999)
+            np.random.seed(999)
+            torch.manual_seed(999)
+            _, protocol = train_3d_unet(
+                model,
+                [],
+                [],
+                load_meta=lambda _: {},
+                make_batch=lambda meta: (None, None),
+                evaluate=lambda current_model, meta: {},
+                loss_fn=lambda outputs, targets: outputs.sum(),
+                device=torch.device("cpu"),
+                epochs=0,
+                learning_rate=1e-3,
+                weight_decay=0.0,
+                patience=1,
+                checkpoint_path=checkpoint,
+                seed=expected_seed,
+                precision="auto",
+            )
+            self.assertEqual(next(model.parameters()).device.type, "cpu")
+            self.assertAlmostEqual(random.random(), expected_python)
+            self.assertAlmostEqual(np.random.random(), expected_numpy)
+            self.assertAlmostEqual(torch.rand(1).item(), expected_torch)
+            self.assertFalse(protocol["amp_enabled"])
+            self.assertFalse(protocol["reproducibility"]["bitwise_determinism_claimed"])
+        finally:
+            if os.path.exists(checkpoint):
+                os.remove(checkpoint)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is unavailable")
+    def test_cuda_synthetic_smoke(self):
+        model = load_unet_class()(base_channels=2)
+        volume_shape = (16, 16, 16)
+        metadata = {
+            "inputs": torch.randn(1, 4, *volume_shape),
+            "targets": torch.zeros(1, *volume_shape, dtype=torch.long),
+        }
+        checkpoint = "baseline_3d_unet_cuda_test.pt"
+        try:
+            _, protocol = train_3d_unet(
+                model,
+                [(None, "case")],
+                [(None, "case")],
+                load_meta=lambda _: metadata,
+                make_batch=lambda meta: (meta["inputs"], meta["targets"]),
+                evaluate=lambda current_model, meta: {
+                    "Dice_WT": 0.1,
+                    "Dice_TC": 0.2,
+                    "Dice_ET": 0.3,
+                },
+                loss_fn=lambda outputs, targets: F.cross_entropy(outputs, targets),
+                device=torch.device("cuda"),
+                epochs=1,
+                learning_rate=1e-3,
+                weight_decay=0.0,
+                patience=1,
+                checkpoint_path=checkpoint,
+                seed=42,
+                precision="auto",
+                channels_last_3d=True,
+            )
+            print(
+                "CUDA smoke:",
+                {
+                    "device": protocol["device"],
+                    "volume_shape": volume_shape,
+                    "batch_size": protocol["batch_size"],
+                    "precision": protocol["amp_dtype"] or "fp32",
+                    "epoch_metrics": protocol["epoch_metrics"],
+                },
+            )
+            self.assertEqual(next(model.parameters()).device.type, "cuda")
         finally:
             if os.path.exists(checkpoint):
                 os.remove(checkpoint)

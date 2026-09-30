@@ -105,6 +105,28 @@ its path plus protocol metadata are recorded in
 in voxel units, sensitivity, precision, and IoU with mean, standard deviation,
 and valid/total counts.
 
+U-Net resource settings are configurable in the baseline cell:
+`UNET_BASE_CHANNELS = 8`, `UNET_BATCH_SIZE = 1`,
+`UNET_GRADIENT_ACCUMULATION_STEPS = 1`, `UNET_PRECISION = "auto"`, and
+`UNET_CHANNELS_LAST_3D = True`. `auto` uses BF16 autocast when the selected
+CUDA device supports it and otherwise uses FP32; set it to `"off"` for an
+explicit FP32 run or `"fp16"` when BF16 is unavailable but FP16 is desired.
+The helper moves the model to the selected device before constructing AdamW,
+applies the configured seed to Python, NumPy, PyTorch, and CUDA RNGs, and
+records requested/effective precision, device, epoch time, and peak allocated
+GPU memory in the checkpoint protocol. These settings do not claim bitwise
+determinism; deterministic algorithms are not enabled by default.
+
+For a target-GPU smoke test in Molab, run:
+
+```bash
+python -m unittest test_3d_unet_baseline.ThreeDUNetBaselineTest.test_cuda_synthetic_smoke
+```
+
+The test uses a synthetic `(1, 4, 16, 16, 16)` volume, one patient per
+training item, `channels_last_3d=True`, and `precision="auto"`. It prints the
+effective device/precision, elapsed epoch time, and peak allocated memory.
+
 The implemented comparison set is CNN-only, 3D U-Net, GraphSAGE or GAT,
 HGT graph-only, and HGT graph+CNN. nnU-Net and SegResNet remain future-work
 placeholders; no baseline performance is implied until the corresponding

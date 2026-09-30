@@ -84,6 +84,32 @@ Current notebook configuration:
 
 These are configured maxima, not a guarantee that every epoch ran. Report the actual completed/best epoch from the run logs or checkpoints. Voxel-refinement results should only be reported when Stage 2 completed and its held-out evaluation was produced.
 
+## Conventional 3D U-Net baseline
+
+`notebook33_part2.ipynb` includes a selectable independent 3D U-Net baseline
+for the same persisted patient-level split used by the graph baselines. It is a
+lightweight two-level 3D encoder-decoder with max-pooling, transposed-convolution
+upsampling, skip connections, four MRI input channels (T1, T1ce, T2, FLAIR),
+and four output classes using the internal label mapping above. Crop bounds are
+derived from MRI foreground only; segmentation labels are used only as training
+targets and evaluation ground truth.
+
+The baseline registry keeps `RUN_BASELINES = False` by default. To include the
+U-Net in a baseline run, set `RUN_BASELINES = True` and leave
+`RUN_3D_UNET_BASELINE = True`. Comparative reporting rejects
+`BASELINE_MAX_CASES != 0`; limited-case comparisons require retraining every
+compared model on the same selected subjects. The best validation-Dice
+checkpoint is saved as `baseline_3d_unet_best.pt` under `PERSISTENT_BASE`, and
+its path plus protocol metadata are recorded in
+`fair_baseline_registry.json`. The registry reports WT, TC, and ET Dice, HD95
+in voxel units, sensitivity, precision, and IoU with mean, standard deviation,
+and valid/total counts.
+
+The implemented comparison set is CNN-only, 3D U-Net, GraphSAGE or GAT,
+HGT graph-only, and HGT graph+CNN. nnU-Net and SegResNet remain future-work
+placeholders; no baseline performance is implied until the corresponding
+training run has completed.
+
 ## Evaluation
 
 The notebook evaluates segmentation at voxel level using the standard BraTS regions:

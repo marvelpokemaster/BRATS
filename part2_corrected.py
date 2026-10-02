@@ -192,8 +192,8 @@ def _():
     print(f"  Voxel CE weight={VOXEL_CE_WEIGHT}  boundary weight={VOXEL_BOUNDARY_WEIGHT}")
     print(f"{'='*60}\n")
     INFERENCE_OVERLAP = 0.25
-    EXPECTED_CASES = 1251
-    CASE_EXCLUSIONS = {}  # Add only verified canonical IDs with documented reasons.
+    EXPECTED_CASES = 1249
+    CASE_EXCLUSIONS = {"BraTS2021_00495": "Missing/duplicate modalities", "BraTS2021_00621": "Missing/duplicate modalities"}
     OFFICIAL_CASE_IDS_PATH = None  # Optional JSON list of official training IDs.
     HF_TOKEN_PLACEHOLDER = ""  # Fill this before uploading/running in molab.
     HF_REQUIRED = True
@@ -1079,6 +1079,9 @@ def _(
 
     def load_meta(mpath):
         return torch.load(mpath, weights_only=False)
+    import sys, os
+    _nb_dir = os.path.dirname(os.path.abspath(__file__)) if '__file__' in globals() else os.getcwd()
+    if _nb_dir not in sys.path: sys.path.insert(0, _nb_dir)
     from brats_protocol import (PROTOCOL_VERSION, segmentation_metrics, summarize_metric_rows,
                                 mean_region_dice, sliding_window_predict, make_training_patch, audit_dataset)
     from brats_gpu import (bounded_prefetch, patient_groups, configure_gpu, amp_context, train_patient_group, train_voxel_experiment)

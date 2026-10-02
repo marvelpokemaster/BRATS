@@ -69,3 +69,6 @@ def check_marimo(notebook_path):
 
 check_marimo("notebook34_part1.ipynb")
 check_marimo("notebook33_part2.ipynb")
+check_marimo("part1_corrected.ipynb")
+check_marimo("part2_corrected.ipynb")
+check_marimo("research_experiments.ipynb")

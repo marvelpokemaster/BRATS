@@ -768,7 +768,7 @@ def _(
     all_nii = glob.glob(os.path.join(dataset_root, "**", "*.nii"), recursive=True)
     all_nii = all_nii + glob.glob(os.path.join(dataset_root, "**", "*.nii.gz"), recursive=True)
     # Remove unpatched duplicates from the main tar so the official patches are used
-    all_nii = [p for p in all_nii if not ("BraTS2021_Training_Data" in p and ("00495" in p or "00621" in p))]
+    all_nii = [p for p in all_nii if not ("/BraTS2021_00495/BraTS2021_00495_" in p.replace("\\", "/")) and not ("/BraTS2021_00621/BraTS2021_00621_" in p.replace("\\", "/"))]
     case_map = {}
     for _p in all_nii:
         _k = modality_kind(_p)

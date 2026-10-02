@@ -1,266 +1,148 @@
-# QoS-HRGN: Heterogeneous Adaptive Graph Learning for BraTS 3D Segmentation
+# BraTS - consolidated research revision v5
 
-QoS-HRGN is a multimodal 3D brain-tumor segmentation research pipeline. It represents MRI volumes as heterogeneous supervoxel graphs, applies a Heterogeneous Graph Transformer (HGT) with node-wise adaptive propagation, and optionally refines the graph predictions at voxel resolution.
+This bundle includes the advisor-concern repairs, GPU calibration, verified
+Hugging Face handoff, and a new controlled research experiment runner. Original
+uploads and synced files were not edited. No real BraTS training, GPU benchmark
+or live Hugging Face upload was performed in this review.
 
-> **Dataset configuration:** The current notebooks target the Kaggle mirror `dschettler8845/brats-2021-task1` (BraTS 2021 Task 1). Dataset discovery in the notebook reported **1,252 complete labeled cases** in the downloaded package. This is the count for that mirror/package, not a claim about every BraTS 2021 challenge release or split.
+## Start here
 
-## Pipeline at a glance
+1. Extract the ZIP. Keep **all five helper modules** beside the notebooks.
+2. Use `.py` notebooks in marimo/molab; matching `.ipynb` copies are included.
+3. Fill the blank `HF_TOKEN_PLACEHOLDER` near the beginning of each notebook
+   you run. Confirm the dataset/model repository IDs and token write access.
+4. Select your RTX Pro 6000 runtime. The configuration checks CUDA and a small
+   3D convolution before the long work. Missing credentials/CUDA stop early.
+5. Run Part 1, then Part 2 for the main model. For the research comparisons,
+   read [RESEARCH_PROTOCOL.md](RESEARCH_PROTOCOL.md) and use the independent
+   experiments notebook in additional sessions.
 
-```text
-BraTS 2021 MRI: T1, T1ce, T2, FLAIR + segmentation
-                         |
-               patient-level data split
-                         |
-        independent 3D SLIC on T1ce and FLAIR
-                         |
-         heterogeneous supervoxel graph
-       (within-modality spatial + cross-modal
-                correspondence edges)
-                         |
-             HGT (2 layers, 4 heads)
-                         |
-       uncertainty-aware adaptive propagation
-             (candidate depths k = 0..4)
-                         |
-           node-wise class prediction
-                         |
-       project graph probabilities to voxels
-                         |
-      optional 3D voxel refinement network
-                         |
-              WT / TC / ET Dice
-                         |
-        diagnostic visualizations / XAI
-```
-
-## Dataset and split
-
-The current data loader uses:
-
-- **Dataset:** `dschettler8845/brats-2021-task1` via `kagglehub`
-- **Modalities:** T1, T1ce (post-contrast T1), T2, and FLAIR
-- **Labels:** raw BraTS labels 0, 1, 2, and 4, internally mapped to 0, 1, 2, and 3
-- **Case discovery:** recursively locates NIfTI files and retains cases with all four modalities and a segmentation
-- **Case limit:** `MAX_CASES = None`, meaning all complete discovered cases are selected
-
-The split is patient-level and shuffled with `SEED = 42`. The notebook applies a 70% / 15% / remainder split using integer truncation:
-
-| Partition | Cases (when 1,252 complete cases are discovered) |
-|---|---:|
-| Train | 876 |
-| Validation | 187 |
-| Test | 189 |
-| **Total** | **1,252** |
-
-The code asserts that patient IDs do not overlap between partitions. If the number of complete cases differs in another environment or dataset revision, the split counts will differ; use the notebook's printed counts as the run-specific record. The Kaggle mirror is a labeled dataset package; these are notebook-created partitions, not necessarily the official challenge partitions.
-
-## Graph representation
-
-- **Node types:** `t1ce` and `flair`, each produced by its own 3D SLIC partition.
-- **SLIC resolution:** `N_SEGMENTS = 15000` per modality; `COMPACTNESS = 0.3`; `SLIC_ITERS = 10`.
-- **Node features:** 32 values: 28 appearance statistics (mean, standard deviation, and five quantiles for each of four MRI modalities) plus four geometric features (normalized centroid coordinates and log-relative volume).
-- **Spatial edges:** connect face-adjacent supervoxels within a modality.
-- **Correspondence edges:** connect supervoxels from the two modalities that overlap in voxel space.
-- **Fractional labels:** node targets preserve the class proportions within each supervoxel, rather than representing each node only by its majority class.
-
-## Model
-
-The graph model uses a two-layer PyTorch Geometric `HGTConv` backbone (hidden dimension 128, four attention heads), followed by uncertainty-aware adaptive propagation. The adaptive component considers candidate propagation depths from 0 through 4 and learns node-specific mixtures rather than imposing one fixed receptive-field depth on every node.
-
-An adaptive edge gate conditions message weighting on node representations, edge information, similarity, relation type, and prediction uncertainty. HGT supplies relation-aware heterogeneous attention; the adaptive propagation/gating module is the project's proposed adaptation.
-
-## Voxel refinement
-
-The pipeline has two training stages:
-
-1. **Stage 1 — graph/node model:** train the heterogeneous graph model and evaluate graph-derived voxel predictions.
-2. **Stage 2 — voxel refinement:** freeze the graph model, project node probabilities into voxel space, combine them with the four MRI channels, and train the voxel refinement head on cropped volumes.
-
-Current notebook configuration:
-- Graph training: `EPOCHS = 100` maximum
-- Voxel refinement: `VOXEL_EPOCHS = 40` maximum
-- Graph early-stopping patience: `EARLY_STOP_PATIENCE = 15`
-- Stage 2 can pause at the configured time budget and resume from its checkpoint.
-
-These are configured maxima, not a guarantee that every epoch ran. Report the actual completed/best epoch from the run logs or checkpoints. Voxel-refinement results should only be reported when Stage 2 completed and its held-out evaluation was produced.
-
-## Conventional 3D U-Net baseline
-
-`notebook33_part2.ipynb` includes a selectable independent 3D U-Net baseline
-for the same persisted patient-level split used by the graph baselines. It is a
-lightweight two-level 3D encoder-decoder with max-pooling, transposed-convolution
-upsampling, skip connections, four MRI input channels (T1, T1ce, T2, FLAIR),
-and four output classes using the internal label mapping above. Crop bounds are
-derived from MRI foreground only; segmentation labels are used only as training
-targets and evaluation ground truth.
-
-### Training protocol and gradient accumulation
-
-Training uses **patient-weighted gradient accumulation**:
-- Each microbatch scales its backward pass by its actual patient count $n_i$.
-- At the optimizer step, accumulated gradients are normalized by the total number
-  of patients $N_{\text{total}} = \sum n_i$ in that accumulation group.
-- This ensures that incomplete final batches or unequal microbatch sizes receive
-  exact per-patient weighting equivalent to a single combined batch.
-- **Loss formulation:** `voxel_loss` supports decoupled per-patient Dice loss
-  (`per_patient_dice=True`), computing spatial intersections and unions per
-  volume before averaging across the batch. For $B=1$ (default), per-patient
-  Dice and global batch Dice are identical; for $B>1$, per-patient reduction
-  ensures exact mathematical linear separability across microbatches.
-- For mixed precision (FP16), gradients are unscaled before normalization and
-  gradient clipping ($L_2 \le 2.0$), preventing scaled-gradient distortion.
-
-The baseline registry keeps `RUN_BASELINES = False` by default. To include the
-U-Net in a baseline run, set `RUN_BASELINES = True` and leave
-`RUN_3D_UNET_BASELINE = True`. Comparative reporting rejects
-`BASELINE_MAX_CASES != 0`; limited-case comparisons require retraining every
-compared model on the same selected subjects.
-
-### Checkpoints and protocol metadata
-
-The best validation-Dice checkpoint is saved as `baseline_3d_unet_best.pt` under
-`PERSISTENT_BASE`. The checkpoint file contains:
-- `state_dict`: model weights.
-- `protocol`: complete experiment metadata including parameter count, optimizer,
-  learning rate, early stopping patience, best epoch, loss description, device,
-  precision requested and effective, gradient accumulation steps, gradient weighting
-  semantics, split fingerprint, and per-epoch timing/memory metrics.
-
-Its path plus protocol metadata are recorded in `fair_baseline_registry.json`.
-The registry reports WT, TC, and ET Dice, HD95 in voxel units, sensitivity,
-precision, and IoU with mean, standard deviation, and valid/total counts.
-
-U-Net resource settings are configurable in the baseline cell:
-`UNET_BASE_CHANNELS = 8`, `UNET_BATCH_SIZE = 1`,
-`UNET_GRADIENT_ACCUMULATION_STEPS = 1`, `UNET_PRECISION = "auto"`, and
-`UNET_CHANNELS_LAST_3D = True`. `auto` uses BF16 autocast when the selected
-CUDA device supports it and otherwise uses FP32; set it to `"off"` for an
-explicit FP32 run or `"fp16"` when BF16 is unavailable but FP16 is desired.
-An explicit `"bf16"` request fails on a CUDA device without BF16 support rather
-than silently changing precision.
-
-### Verification and tests
-
-For unit tests and gradient accumulation checks:
-
-```bash
-python -m unittest test_3d_unet_baseline -v
-```
-
-For a target-GPU smoke test in Molab:
-
-```bash
-python -m unittest test_3d_unet_baseline.ThreeDUNetBaselineTest.test_cuda_synthetic_smoke
-```
-
-For an opt-in integration test on a genuine BraTS case (requires an authorized
-environment with downloaded BraTS data; never executed on local development machines):
-
-```bash
-BRATS_REAL_CASE_PATH=/path/to/BraTS2021_00000 \
-BRATS_UNET_CHECKPOINT=/path/to/baseline_3d_unet_best.pt \
-python -m unittest test_3d_unet_baseline.ThreeDUNetBaselineTest.test_opt_in_real_brats_case_pipeline -v
-```
-
-The implemented comparison set is CNN-only, 3D U-Net, GraphSAGE or GAT,
-HGT graph-only, and HGT graph+CNN. nnU-Net and SegResNet remain future-work
-placeholders; no baseline performance is implied until the corresponding
-training run has completed.
-
-## Evaluation
-
-The notebook evaluates segmentation at voxel level using the standard BraTS regions:
-
-- **WT (Whole Tumor):** NCR/NET + ED + ET
-- **TC (Tumor Core):** NCR/NET + ET
-- **ET (Enhancing Tumor):** ET
-
-| Region | Definition |
+| File | Purpose |
 |---|---|
-| WT | Internal classes 1, 2, 3 |
-| TC | Internal classes 1, 3 |
-| ET | Internal class 3 |
+| `part1_corrected.py` / `.ipynb` | Dataset audit, graph training, verified HF handoff |
+| `part2_corrected.py` / `.ipynb` | Restore handoff, train voxel refinement, main evaluation |
+| `research_experiments.py` / `.ipynb` | Controlled component experiments, resumable across sessions |
+| `brats_protocol.py` | Dataset audit, label-independent inference, metrics |
+| `brats_gpu.py` | GPU calibration, mixed precision, preparation and OOM retries |
+| `brats_transfer.py` | Verified uploads/downloads and ZIP extraction |
+| `brats_experiments.py` | Frozen experiment plans, training/evaluation continuation, reports |
+| `baseline_3d_unet.py` | Existing optional baseline helper |
 
-Use the held-out **test** partition for final reported performance. Validation metrics are for model selection and should not be presented as test performance. This README does not hard-code Dice values because they must correspond to the exact completed run, model checkpoint, post-processing configuration, and test split. Include per-region Dice (WT, TC, ET), and clarify whether values are raw or post-processed.
+The independent research notebook restores Part 1's audited data/split but
+does not execute the main Part 2 refinement run. Enable `RUN_ABLATIONS` in its
+last configuration cell. The default study has **18 configurations x 3 seeds**;
+use `RESEARCH_JOBS` and `RESEARCH_ACTIVE_SEEDS` to schedule individual sessions.
+Changing scheduling does not change the frozen study. This complete study
+requires many sessions; it is not expected to finish inside one 12-hour run.
 
-## Running the notebooks
+## What the final research revision fixes
 
-The repository separates the work into two notebooks to support the staged training/checkpoint workflow:
+- The full ablation row includes structural refinement, matching the declared
+  proposed model. There is also a descriptor-free refinement control.
+- Fixed-depth and uniform-mixture controls use the proposed model's same
+  shared propagation operator. Maximum-depth and no-hop-penalty rows help
+  interpret the mechanism separately from its regularizer.
+- SLIC resolution runs preserve exactly the same patient IDs/subsets.
+- Graph and voxel training match the relevant optimizer, loss, schedule,
+  stopping and inference settings, except for each declared intervention.
+- Graph-only and no-boundary comparisons reuse identical graph weights.
+- Research training, SLIC preparation and per-patient evaluation resume across
+  sessions and use verified HF receipts. Test evaluation waits for the entire
+  frozen training plan to finish.
+- Reports include patient metrics, seed variability, paired confidence
+  intervals, corrected comparison p-values, curves, resource measurements,
+  and up to ten paired graph/hybrid/error examples with disclosed selection.
+- Optional `RUN_REGION_XAI=True` computes direct WT/TC/ET probability
+  attributions for the graph branch. Its fixed topology and exclusion of the
+  CNN are explicit. These extra analysis cells are disabled by default.
 
-1. **`notebook34_part1.ipynb` — Stage 1**
-   - Installs/imports dependencies through the notebook environment.
-   - Downloads/discovers the BraTS 2021 Kaggle dataset.
-   - Builds or loads the graph cache.
-   - Creates the patient-level train/validation/test split.
-   - Trains and evaluates the graph model.
-   - Saves and uploads the Stage 1 checkpoint and run metadata.
+The protocol document explains each row, how both uploaded papers informed
+the design, how to report results, and what evidence is still needed before
+journal submission. None of the exported software files contain real results.
 
-2. **`notebook33_part2.ipynb` — Stage 2**
-   - Loads and validates the Stage 1 checkpoint and matching split/configuration.
-   - Prepares projected graph-probability maps and MRI crops.
-   - Trains/resumes voxel refinement.
-   - Evaluates graph-only versus graph-plus-voxel-refinement predictions and runs diagnostics.
+## GPU behavior
 
-Run Stage 1 first and wait for the notebook's checkpoint upload/verification to finish before starting Stage 2. Both notebooks require access to the expected cache/checkpoint locations and compatible configuration. A checkpoint from a different split or configuration is intentionally rejected.
+Stage 1 retains its graph architecture/batch size and overlaps bounded batch
+preparation with GPU work. Stage 2 calibrates training microbatches 1/2/4 and
+inference batches 1/2/4/8 on the detected device. It prefers BF16 where supported,
+otherwise FP16, and recalibrates in FP32 if a fresh run has non-finite probes.
+Recorded precision is preserved when resuming a trained checkpoint.
 
-### Environment and access
+Training keeps a fixed effective batch of four patients through gradient
+accumulation. Weighted CE is averaged per patient. OOM retries discard partial
+gradients and replay the same group at a smaller microbatch. Inference retries
+without duplicating coverage. Probe weights and Torch RNG are restored before
+training. Bounded CPU workers prepare pinned patches and never execute the
+graph model on the GPU. `gpu_runtime.json` and research checkpoints record the
+hardware, selected settings, timings and allocated memory.
 
-The notebooks are designed for a Python environment with PyTorch, CUDA, PyTorch Geometric, and the listed scientific packages. They also use:
+For troubleshooting a fresh run, `GPU_AUTOTUNE=False`,
+`VOXEL_MAX_MICROBATCH=1`, `INFERENCE_MAX_BATCH=1` and
+`VOXEL_PREFETCH_WORKERS=0` provide a conservative path. Precision/effective-batch
+changes intentionally invalidate an incompatible Stage 2 resume. No custom
+CUDA kernels or model compilation were added.
 
-- `kagglehub` for dataset download (configure Kaggle credentials/access as required by Kaggle)
-- Hugging Face Hub for graph-cache/checkpoint persistence when enabled (configure a token with appropriate repository permissions)
+CPU graph construction, metadata reads, ZIP creation and uploads can still
+limit throughput. Available VRAM does not establish sufficient RAM/disk or
+guarantee the session limit. Budget checks occur between operations; actual
+GPU speed, storage requirements and the longest operations need a molab run.
 
-Store credentials in environment variables or the runtime's secret manager. **Do not commit Kaggle or Hugging Face tokens to the repository or notebook.**
+## Handoff and compatibility
 
-A full 1,252-case run can be compute-, memory-, storage-, and time-intensive. First validate the workflow with a small `MAX_CASES` value, then restore `MAX_CASES = None` for the full experiment. Make sure the resulting split and checkpoint are from the same run.
+Part 1 uploads a complete graph-cache ZIP, saved graph checkpoint and handoff
+manifest. Hash/size checks and recorded immutable HF revisions let Part 2
+restore those exact artifacts even if repository files later change. Complete
+matching graph ZIPs are reused. Transfer failures preserve local artifacts and
+are not reported as success. Use the same audited data/settings in both parts.
 
-## Main configuration
+Repaired **Stage 1 review-v3** checkpoints remain compatible; rerun the updated
+save/handoff cells if the earlier manifest lacks pinned ZIP receipts. The
+main Stage 2 **GPU-v4** checkpoint protocol remains compatible with this v5
+research update. Older pre-GPU-v4 refinement checkpoints require fresh training.
+The new research runner uses a separate `research_v5/<study-id>/` namespace and
+retrains controlled models rather than reusing unmatched research results.
 
-```python
-# Dataset
-DATASET_SLUG = "dschettler8845/brats-2021-task1"
-MAX_CASES = None
+Main training saves completed epochs and restores model/optimizer/scheduler/
+scaler/RNG/history. Partial epochs replay. Later main diagnostics wait for
+Stage 2 completion. Keep the legacy `RUN_BASELINES=False` for the matched
+research study; use the new runner's CNN/GraphSAGE rows. The old small U-Net
+driver remains exploratory and lacks complete rolling resume.
 
-# Graph
-N_SEGMENTS = 15000
-COMPACTNESS = 0.3
-SLIC_ITERS = 10
-NODE_TYPES = ("t1ce", "flair")
-NODE_FEAT_DIM = 32
+## Dataset and evaluation essentials
 
-# Graph model
-HIDDEN_DIM = 128
-HEADS = 4
-HGT_LAYERS = 2
-USE_ADAPTIVE_HOPS = True
-K_MAX = 4
-EPOCHS = 100                 # maximum graph epochs
+The expected cohort is **1251**, giving **875/187/189** under the existing split
+rounding. A 1252-case cohort gives 876/187/189. The audit stops on unexplained
+counts, duplicate MRI content, inconsistent modalities or geometry. It does
+not discard an arbitrary patient. Use documented `CASE_EXCLUSIONS` and, when
+available, `OFFICIAL_CASE_IDS_PATH`. Inspect `audit/dataset_audit.json`; matching
+the count alone does not prove official membership. The pipeline currently
+requires matching 1 mm geometry and uses an internal patient split.
 
-# Voxel refinement
-USE_VOXEL_REFINEMENT = True
-VOXEL_EPOCHS = 40            # maximum refinement epochs
-VOXEL_BASE_CHANNELS = 32
-```
+Validation/model selection use full-volume postprocessed WT/TC/ET Dice.
+Inference never reads segmentation labels to choose a crop. Labels may guide
+training patch sampling and post-test figure selection. Training patch Dice,
+node proxy Dice and full-volume validation Dice measure different supports.
 
-See the notebook cells for the complete configuration, optional structural refinement and masked-reconstruction settings, checkpoint paths, and diagnostic switches.
+HD95 is in mm with a documented custom empty-region convention: both-empty
+gets HD95=0/Dice=1; one-empty gets Dice=0 and a physical volume-diagonal HD95
+penalty. Patients are retained in mean/SD. Do not assume official-evaluator
+parity or compare with papers using another convention.
 
-## Label mapping
+## Verification and limits
 
-| Raw label | Internal label | Meaning |
-|---:|---:|---|
-| 0 | 0 | Background |
-| 1 | 1 | NCR/NET |
-| 2 | 2 | Edema (ED) |
-| 4 | 3 | Enhancing Tumor (ET) |
+**35 synthetic check groups passed:** 12 regression, 12 GPU/transfer and
+11 research integration groups. The integration checks exercise real tiny
+PyG HGT, structural refinement, shared-hop and GraphSAGE models, gradients,
+label-free inference, CNN training, exact CPU resume with dropout, interrupted
+SLIC/evaluation, paired statistics, saved figures, mocked research HF receipts
+and direct region Shapley efficiency. Real HF client signatures were checked.
 
-## Repository contents
+All three notebooks pass marimo 0.24.0 scope/dependency analysis and native
+`marimo check`. Public names have one defining cell; leading-underscore names
+are cell-local. The loaded graph model and downstream completion dependencies
+are explicit. See `validation_results.json`, `gpu_transfer_validation.json`,
+`research_validation.json`, `marimo_validation.json` and `source_provenance.json`.
 
-- `notebook34_part1.ipynb`: Stage 1 graph construction, training, and evaluation.
-- `notebook33_part2.ipynb`: Stage 2 voxel refinement and downstream diagnostics.
-- Other repository files may contain intermediate experiments or artifacts; use the two staged notebooks above as the current workflow.
-
-## References
-
-- Saueressig, C., Berkley, A., Kang, E., Munbodh, R., & Singh, R. (2020). *Exploring Graph-Based Neural Networks for Automatic Brain Tumor Segmentation.* DataMod 2020.
-- Hu, Z., Dong, Y., Wang, K., & Sun, Y. (2020). *Heterogeneous Graph Transformer.* Proceedings of The Web Conference (WWW 2020).
-- BraTS 2021 Task 1 data mirror: `dschettler8845/brats-2021-task1` on Kaggle.
+These checks do not certify actual CUDA behavior, full-cohort runtime/memory,
+live Hub reliability, research novelty or journal acceptance. Real results,
+failure analysis and a justified manuscript claim are still required.

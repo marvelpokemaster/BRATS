@@ -1,0 +1,19 @@
+{
+  "passed": [
+    "All corrected notebook code cells parse; saved outputs removed",
+    "Sliding windows cover corners, tails, and volumes smaller than the ROI",
+    "MRI-only sliding inference is label invariant and matches direct pointwise whole-volume prediction",
+    "Hybrid inference accepts no labels; CNN and hybrid training use identical patch coordinates for equal RNG",
+    "HD95 uses physical spacing and retains complete misses; summaries include every patient",
+    "Actual refinement architecture and weighted Dice/CE/focal/boundary loss have finite gradients",
+    "Dataset audit validates IDs/count/geometry and catches content duplicates under different IDs",
+    "Local-only Stage1 save/manifest and Part2 verified handoff work without remote APIs",
+    "Stage2 executes, saves, evaluates, and resume reproduces continuous training weights exactly",
+    "Stage2 rejects resume with different graph checkpoint weights",
+    "Budget pause keeps the completed checkpoint and stops downstream evaluation",
+    "Pause before first calibration preserves epoch-zero state and permits fresh precision selection on resume"
+  ],
+  "torch": "2.14.1+cpu",
+  "numpy": "2.5.3",
+  "scope": "Synthetic CPU tests only; full BraTS/molab run not executed"
+}

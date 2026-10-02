@@ -191,8 +191,8 @@ def _():
     print(f"  Voxel CE weight={VOXEL_CE_WEIGHT}  boundary weight={VOXEL_BOUNDARY_WEIGHT}")
     print(f"{'='*60}\n")
     INFERENCE_OVERLAP = 0.25
-    EXPECTED_CASES = 1249
-    CASE_EXCLUSIONS = {"BraTS2021_00495": "Missing/duplicate modalities", "BraTS2021_00621": "Missing/duplicate modalities"}
+    EXPECTED_CASES = 1251
+    CASE_EXCLUSIONS = {}  # Add only verified canonical IDs with documented reasons.
     OFFICIAL_CASE_IDS_PATH = None  # Optional JSON list of official training IDs.
     HF_TOKEN_PLACEHOLDER = ""  # Fill this before uploading/running in molab.
     HF_REQUIRED = True
@@ -767,6 +767,8 @@ def _(
 
     all_nii = glob.glob(os.path.join(dataset_root, "**", "*.nii"), recursive=True)
     all_nii = all_nii + glob.glob(os.path.join(dataset_root, "**", "*.nii.gz"), recursive=True)
+    # Remove unpatched duplicates from the main tar so the official patches are used
+    all_nii = [p for p in all_nii if not ("BraTS2021_Training_Data" in p and ("00495" in p or "00621" in p))]
     case_map = {}
     for _p in all_nii:
         _k = modality_kind(_p)

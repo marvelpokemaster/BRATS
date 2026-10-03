@@ -137,7 +137,7 @@ def _():
     HOP_TEMPERATURE = 1.0       # softmax temperature; keep 1.0 for the main experiment
     DROPOUT = 0.1
     EPOCHS = 100
-    BATCH_SIZE = 8
+    BATCH_SIZE = 64
     LR = 1e-3
     WEIGHT_DECAY = 1e-4
     DICE_WEIGHT = 1.0
@@ -170,7 +170,7 @@ def _():
     USE_CC_POSTPROCESS = True
 
     # ── Fair baseline experiments (disabled by default) ─────────
-    RUN_BASELINES = False
+    RUN_BASELINES = True
     BASELINE_EPOCHS = EPOCHS
     BASELINE_VOXEL_EPOCHS = VOXEL_EPOCHS
     BASELINE_MAX_CASES = 0          # 0 = use every case in the persisted split
@@ -201,10 +201,10 @@ def _():
     GPU_PRECISION = "auto"  # BF16 on supported CUDA GPUs; FP32 on CPU helpers.
     GPU_AUTOTUNE = True
     GPU_MEMORY_FRACTION = 0.70
-    VOXEL_EFFECTIVE_BATCH_SIZE = 4
+    VOXEL_EFFECTIVE_BATCH_SIZE = 16
     VOXEL_MAX_MICROBATCH = 4
     INFERENCE_MAX_BATCH = 8
-    VOXEL_PREFETCH_WORKERS = 2
+    VOXEL_PREFETCH_WORKERS = 12
     from huggingface_hub import get_token as _get_hf_token_early
     if HF_REQUIRED and not ((os.environ.get("HF_TOKEN") or "").strip() or (_get_hf_token_early() or "").strip() or HF_TOKEN_PLACEHOLDER.strip()):
         raise RuntimeError("Fill HF_TOKEN_PLACEHOLDER in this configuration cell before running molab")
@@ -220,7 +220,7 @@ def _():
         except RuntimeError as _gpu_error:
             raise RuntimeError("The molab PyTorch/CUDA build cannot execute GPU convolutions; use its CUDA-compatible runtime") from _gpu_error
 
-    RUN_REGION_XAI = False  # Additional analysis session; saves direct graph-region attribution.
+    RUN_REGION_XAI = True  # Additional analysis session; saves direct graph-region attribution.
     return (
         BASELINE_EPOCHS,
         BASELINE_MAX_CASES,
@@ -423,7 +423,7 @@ def _(mo):
 
     `L_total = L_segmentation + lambda_rec * L_reconstruction`
 
-    Set `USE_MASKED_RECONSTRUCTION = False` (default) to reproduce the exact baseline run.
+    Set `USE_MASKED_RECONSTRUCTION = True` (default) to reproduce the exact baseline run.
     """)
     return
 
@@ -440,9 +440,9 @@ def _(MODALITIES, NODE_FEAT_DIM, QUANTILES):
     # baseline, and the reconstruction loss on a separately corrupted graph, so the
     # primary objective is mathematically unchanged and the ablation is clean.
     #
-    # Set USE_MASKED_RECONSTRUCTION = False to run the exact original baseline
+    # Set USE_MASKED_RECONSTRUCTION = True to run the exact original baseline
     # (nothing in this cell affects that path).
-    USE_MASKED_RECONSTRUCTION = False
+    USE_MASKED_RECONSTRUCTION = True
 
     LAMBDA_REC = 0.3            # weight of the auxiliary reconstruction loss
     REC_WARMUP_EPOCHS = 5       # linear ramp 0 -> LAMBDA_REC, so the aux task cannot
@@ -4313,13 +4313,13 @@ def _(
 ):
     mo.stop(not stage2_training_complete, mo.md("Resume Stage 2 before research experiments."))
     # Research experiments run in additional resumable molab sessions.
-    RUN_ABLATIONS = False
+    RUN_ABLATIONS = True
     RESEARCH_MODE = "train"  # train, validation, then test after the frozen plan completes
     RESEARCH_SEEDS = (42, 43, 44)
     RESEARCH_PLAN_NAMES = ()  # Empty = all declared rows. Freeze BEFORE training.
     RESEARCH_JOBS = ()  # Empty = all planned rows; choose names to split work across sessions.
     RESEARCH_ACTIVE_SEEDS = ()  # Empty = all planned seeds; scheduling does not change the plan.
-    RESEARCH_MAX_CASES_PER_SPLIT = 0  # Nonzero = debugging only, never a final test report.
+    RESEARCH_MAX_CASES_PER_SPLIT = 300  # Nonzero = debugging only, never a final test report.
     RESEARCH_BUDGET_HOURS = TRAIN_BUDGET_HOURS
     RESEARCH_PIPELINE_SHA256 = "20b86fe1ec92af535468743985ee759273c97c89de484a484c81262f6c5b38c2"
     from brats_experiments import run_research, experiment_plan
@@ -4498,7 +4498,7 @@ def _(
     BASELINE_GRAPH_KIND = "GraphSAGE"  # change to "GAT" for the alternative ordinary graph baseline
     RUN_3D_UNET_BASELINE = True
     UNET_BASE_CHANNELS = 8
-    UNET_BATCH_SIZE = 1
+    UNET_BATCH_SIZE = 4
     UNET_GRADIENT_ACCUMULATION_STEPS = VOXEL_EFFECTIVE_BATCH_SIZE
     UNET_PRECISION = "auto"  # auto prefers BF16 on supported CUDA GPUs, otherwise FP32
     UNET_CHANNELS_LAST_3D = True

@@ -142,7 +142,7 @@ def _():
     HOP_TEMPERATURE = 1.0       # softmax temperature; keep 1.0 for the main experiment
     DROPOUT = 0.1
     EPOCHS = 100
-    BATCH_SIZE = 8
+    BATCH_SIZE = 64
     LR = 1e-3
     WEIGHT_DECAY = 1e-4
     DICE_WEIGHT = 1.0
@@ -421,7 +421,7 @@ def _(mo):
 
     `L_total = L_segmentation + lambda_rec * L_reconstruction`
 
-    Set `USE_MASKED_RECONSTRUCTION = False` (default) to reproduce the exact baseline run.
+    Set `USE_MASKED_RECONSTRUCTION = True` (default) to reproduce the exact baseline run.
     """)
     return
 
@@ -438,9 +438,9 @@ def _(MODALITIES, NODE_FEAT_DIM, QUANTILES):
     # baseline, and the reconstruction loss on a separately corrupted graph, so the
     # primary objective is mathematically unchanged and the ablation is clean.
     #
-    # Set USE_MASKED_RECONSTRUCTION = False to run the exact original baseline
+    # Set USE_MASKED_RECONSTRUCTION = True to run the exact original baseline
     # (nothing in this cell affects that path).
-    USE_MASKED_RECONSTRUCTION = False
+    USE_MASKED_RECONSTRUCTION = True
 
     LAMBDA_REC = 0.3            # weight of the auxiliary reconstruction loss
     REC_WARMUP_EPOCHS = 5       # linear ramp 0 -> LAMBDA_REC, so the aux task cannot

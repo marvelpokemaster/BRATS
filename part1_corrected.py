@@ -88,7 +88,7 @@ def _(mo):
 @app.cell
 def _():
     # packages added via marimo's package management: torch-geometric nibabel scikit-image matplotlib kagglehub scipy joblib
-    import os, glob, re, random, time, math, datetime, json, hashlib
+    import os, sys, glob, re, random, time, math, datetime, json, hashlib
     import numpy as np
     import matplotlib.pyplot as plt
     import nibabel as nib

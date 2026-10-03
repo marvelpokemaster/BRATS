@@ -821,9 +821,9 @@ def _(
     HF_CACHE_ZIP_NAME = f"{HF_CACHE_SUBDIR}.zip"
     GRAPH_CACHE_RECEIPT_PATH = os.path.join(PERSISTENT_BASE, "graph_cache_receipt.json")
     GRAPH_CACHE_ZIP_PATH = GRAPH_CACHE_PATH + ".zip"
-    STAGE1_REMOTE_NAME = "stage1_graph_model_review_v3.pt"
-    STAGE1_MANIFEST_NAME = "stage1_graph_model_review_v3.manifest.json"
-    STAGE1_LATEST_NAME = "stage1_latest_review_v3.pt"
+    STAGE1_REMOTE_NAME = "stage1_graph_model.pt"
+    STAGE1_MANIFEST_NAME = "stage1_graph_model.manifest.json"
+    STAGE1_LATEST_NAME = "stage1_latest.pt"
     STAGE2_LATEST_NAME = "stage2_latest_gpu_v4.pt"
     STAGE1_CKPT_PATH = os.path.join(PERSISTENT_BASE, STAGE1_REMOTE_NAME)
     STAGE1_LATEST_PATH = os.path.join(PERSISTENT_BASE, STAGE1_LATEST_NAME)

@@ -20,7 +20,7 @@ from brats_transfer import sha256_path, write_json_atomic, extract_verified_zip
 from brats_protocol import make_training_patch, sliding_window_predict, mean_region_dice, segmentation_metrics, summarize_metric_rows
 from brats_gpu import configure_gpu, bounded_prefetch, patient_groups, train_patient_group
 
-RESEARCH_VERSION = "research-v5"
+RESEARCH_VERSION = "research-v6-zip-ssl"
 
 
 class BudgetPause(RuntimeError):
@@ -89,11 +89,11 @@ def frozen_subset(groups, maximum=0, seed=42):
     return selected
 
 
-def experiment_plan(n_segments, hops, k_max=4):
+def experiment_plan(n_segments, hops, k_max=4, masked_reconstruction=True):
     """All rows specify the complete pipeline; each patch states the change."""
     full = dict(backbone="hgt", structural=True, descriptors=True, hop_mode="adaptive",
                 fixed_hops=hops, cross_edges=True, soft_labels=True, voxel=True,
-                boundary=True, focal=True, hop_penalty=True, n_segments=n_segments)
+                boundary=True, focal=True, hop_penalty=True, n_segments=n_segments, masked_reconstruction=masked_reconstruction, voxel_kind="refinement")
     changes = [
         ("full", {}, "Complete proposed pipeline"),
         ("no_structural", {"structural":False}, "Remove structural module and its auxiliary loss"),
@@ -107,10 +107,13 @@ def experiment_plan(n_segments, hops, k_max=4):
         ("hard_labels", {"soft_labels":False}, "Replace graph fractional targets by majority one-hot labels"),
         ("no_boundary", {"boundary":False}, "Set voxel boundary auxiliary loss weight to zero"),
         ("no_voxel", {"voxel":False}, "Use the SAME full graph checkpoint without voxel refinement"),
-        ("cnn_only", {"backbone":"none", "structural":False}, "Four-MRI-channel CNN with the same head/voxel training policy"),
+        ("cnn_only", {"backbone":"none", "structural":False, "masked_reconstruction":False}, "Four-MRI-channel CNN with the same head/voxel training policy"),
         ("graphsage_backbone", {"backbone":"sage"}, "Homogeneous max-pool GraphSAGE backbone control; not a paper reproduction"),
         ("dice_ce", {"focal":False, "boundary":False}, "Loss-family control: Dice + weighted CE (graph and voxel)"),
     ]
+    if masked_reconstruction:
+        changes.append(("no_masked_reconstruction", {"masked_reconstruction":False}, "Remove masked feature/link reconstruction and decoder; retain supervised graph objective"))
+    changes.append(("unet_3d", {"backbone":"none", "structural":False, "masked_reconstruction":False, "voxel_kind":"unet", "boundary":False}, "Independent 3D U-Net, same split/patches/full-volume selection; no boundary head"))
     changes += [(f"slic_{n}", {"n_segments":n}, "Complete pipeline at changed SLIC resolution")
                 for n in (5000, 10000, 15000, 20000) if n != n_segments]
     return [dict(name=name, description=description, **dict(full, **delta)) for name, delta, description in changes]
@@ -365,6 +368,59 @@ class HomogeneousSAGE(torch.nn.Module):
         return {nt:self.head(h) for nt,h in embeddings.items()}, embeddings
 
 
+def save_imported_selection(store,name,signature,model,epoch,best_epoch,score,history,runtime,lr,decay,epochs,origin):
+    # Complete selections are inference-only; these placeholder optimizer states
+    # are never used to continue training imported models.
+    optimizer=torch.optim.AdamW((p for p in model.parameters() if p.requires_grad),lr=lr,weight_decay=decay)
+    scheduler=torch.optim.lr_scheduler.CosineAnnealingLR(optimizer,T_max=epochs,eta_min=lr*.02)
+    scaler=torch.amp.GradScaler("cuda",enabled=next(model.parameters()).device.type=="cuda" and runtime["precision"]=="fp16")
+    weights=cpu_state(model)
+    store.save(name,dict(signature=signature,epoch=epoch,model=weights,best=weights,optimizer=optimizer.state_dict(),
+        scheduler=scheduler.state_dict(),scaler=scaler.state_dict(),rng=rng_state(),best_epoch=best_epoch,
+        best_score=score,stale=0,history=history,complete=True,runtime=runtime,precision_validated=True,origin=origin),push=True)
+
+
+class IndependentUNet(torch.nn.Module):
+    """Lightweight independent 3D U-Net for four-channel BraTS volumes."""
+    def __init__(self, in_channels=4, num_classes=4, base_channels=8):
+        super().__init__()
+        self.channels_last_3d = False
+        self.amp_enabled = False
+        self.amp_dtype = None
+        def block(cin, cout):
+            return torch.nn.Sequential(
+                torch.nn.Conv3d(cin, cout, 3, padding=1, bias=False),
+                torch.nn.InstanceNorm3d(cout, affine=True),
+                torch.nn.LeakyReLU(inplace=True),
+                torch.nn.Conv3d(cout, cout, 3, padding=1, bias=False),
+                torch.nn.InstanceNorm3d(cout, affine=True),
+                torch.nn.LeakyReLU(inplace=True),
+            )
+        self.enc1 = block(in_channels, base_channels)
+        self.enc2 = block(base_channels, base_channels * 2)
+        self.bottleneck = block(base_channels * 2, base_channels * 4)
+        self.pool = torch.nn.MaxPool3d(2)
+        self.up2 = torch.nn.ConvTranspose3d(base_channels * 4, base_channels * 2, 2, stride=2)
+        self.dec2 = block(base_channels * 4, base_channels * 2)
+        self.up1 = torch.nn.ConvTranspose3d(base_channels * 2, base_channels, 2, stride=2)
+        self.dec1 = block(base_channels * 2, base_channels)
+        self.out = torch.nn.Conv3d(base_channels, num_classes, 1)
+
+    def forward(self, x):
+        e1 = self.enc1(x)
+        e2 = self.enc2(self.pool(e1))
+        b = self.bottleneck(self.pool(e2))
+        d2 = self.up2(b)
+        if d2.shape[2:] != e2.shape[2:]:
+            d2 = torch.nn.functional.interpolate(d2, size=e2.shape[2:], mode="trilinear", align_corners=False)
+        d2 = self.dec2(torch.cat((d2, e2), dim=1))
+        d1 = self.up1(d2)
+        if d1.shape[2:] != e1.shape[2:]:
+            d1 = torch.nn.functional.interpolate(d1, size=e1.shape[2:], mode="trilinear", align_corners=False)
+        d1 = self.dec1(torch.cat((d1, e1), dim=1))
+        return self.out(d1), None
+
+
 class ResearchRunner:
     def __init__(self, context, settings):
         self.c, self.settings = context, settings
@@ -372,7 +428,7 @@ class ResearchRunner:
         self.deadline = Deadline(settings["budget_hours"],settings.get("session_start"))
         self.groups = frozen_subset(dict(train=c["train_items"],val=c["val_items"],test=c["test_items"]),
                                     settings["max_cases_per_split"],c["SEED"])
-        all_rows = experiment_plan(c["N_SEGMENTS"],c["HOPS"],c["K_MAX"])
+        all_rows = experiment_plan(c["N_SEGMENTS"],c["HOPS"],c["K_MAX"],c["USE_MASKED_RECONSTRUCTION"])
         requested = settings["plan_names"] or [row["name"] for row in all_rows]
         if len(set(requested))!=len(requested) or set(requested)-{row["name"] for row in all_rows}:
             raise ValueError("Unknown/duplicate experiment name in frozen plan")
@@ -382,8 +438,8 @@ class ResearchRunner:
         self.seeds = tuple(int(seed) for seed in settings["seeds"])
         if not self.seeds or len(set(self.seeds))!=len(self.seeds):
             raise ValueError("Supply distinct research seeds")
-        if c["USE_MASKED_RECONSTRUCTION"]:
-            raise ValueError("This declared study requires USE_MASKED_RECONSTRUCTION=False in both main notebooks")
+        if c["USE_MASKED_RECONSTRUCTION"] and not c["REC_SEPARATE_CLEAN_PASS"]:
+            raise ValueError("Continuation research requires Part 1's declared separate clean reconstruction pass")
         if not c["USE_STRUCTURAL_REFINEMENT"] or not c["USE_ADAPTIVE_HOPS"]:
             raise ValueError("The full research row requires the declared structural + adaptive main configuration")
         source_files = [Path(__file__),Path(__file__).with_name("brats_gpu.py"),Path(__file__).with_name("brats_protocol.py")]
@@ -393,18 +449,21 @@ class ResearchRunner:
             pipeline_definitions_sha256=c.get("RESEARCH_PIPELINE_SHA256","synthetic-test-fixture"),
             postprocess=dict(enabled=c["USE_CC_POSTPROCESS"],et_min_voxels=c["ET_MIN_VOXELS"]),
             structural_teacher=dict(start=c["STRUCTURAL_TEACHER_PROB_START"],end=c["STRUCTURAL_TEACHER_PROB_END"]),
+            ssl=dict(enabled=c["USE_MASKED_RECONSTRUCTION"], settings={k:c.get(k) for k in
+                ("LAMBDA_REC","REC_WARMUP_EPOCHS","REC_MASK_RATE","REC_EDGE_MASK_RATE","REC_FLAGS","REC_NEG_PER_POS","REC_FEAT_LOSS","REC_SCE_GAMMA","REC_SEPARATE_CLEAN_PASS")}),
             class_weights=c["class_weights"].cpu().tolist(),source_hashes={p.name:sha256_path(p) for p in source_files},
             epochs=c["EPOCHS"],voxel_epochs=c["VOXEL_EPOCHS"],patience=c["EARLY_STOP_PATIENCE"],
             debug=bool(settings["max_cases_per_split"]),selection="validation full-volume postprocessed mean WT/TC/ET Dice",
             metric_policy="custom finite empty-region HD95; see RESEARCH_PROTOCOL.md")
         self.key = identity(self.manifest)[:20]
-        remote = "research_v5/"+self.key
+        remote = "research_v6/"+self.key
         upload = receipt = download = None
         if c["HF_ENABLED"]:
             upload = lambda local,name:c["hf_upload_file_verified"](local,name,c["HF_MODEL_REPO_ID"],c["HF_MODEL_REPO_TYPE"],"research checkpoint/artifact")
             receipt = lambda name:c["hf_upload_receipt"](c["HF_MODEL_REPO_ID"],name)
             download = lambda name,revision:c["hf_try_download"](name,c["HF_MODEL_REPO_ID"],c["HF_MODEL_REPO_TYPE"],revision=revision)
-        self.store = ArtifactStore(Path(c["PERSISTENT_BASE"])/"research_v5"/self.key,remote,upload,receipt,download)
+        self.store = (c["RESEARCH_STORE_FACTORY"](self.key) if c.get("RESEARCH_STORE_FACTORY") else
+                      ArtifactStore(Path(c["PERSISTENT_BASE"])/"research_v6"/self.key,remote,upload,receipt,download))
         self.store.save("protocol.json",self.manifest,push=True)
 
     def transformed(self,groups,spec):
@@ -453,6 +512,8 @@ class ResearchRunner:
                 gp,mp = folder/(cid+".graph.pt"),folder/(cid+".meta.pt")
                 if gp.exists() and mp.exists():
                     continue
+                if not c.get("RAW_SOURCE_AVAILABLE",True):
+                    raise RuntimeError("The saved SLIC archive is incomplete. Resume Part 4, which has the audited raw MRI, before evaluation.")
                 if shutil.disk_usage(folder).free < 2*1024**3:
                     raise RuntimeError("Less than 2 GiB free disk before SLIC build; preserve the cache and use more storage")
                 start=time.perf_counter()
@@ -521,11 +582,26 @@ class ResearchRunner:
     def fit_graph(self,spec,seed,groups):
         c=self.c
         # Voxel/boundary-only changes intentionally reuse identical graph weights.
-        graph_spec={k:v for k,v in spec.items() if k not in ("name","description","voxel","boundary")}
+        graph_spec={k:v for k,v in spec.items() if k not in ("name","description","voxel","boundary","voxel_kind")}
         gid=identity(graph_spec)[:16]
         name=f"models/{gid}/seed_{seed}/graph.pt"
         model=self.graph_factory(spec,seed)
+        rec=None
+        if spec["masked_reconstruction"]:
+            rec=c["HeteroMaskedReconstructor"](hidden_dim=c["HIDDEN_DIM"],appearance_dim=c["APPEARANCE_DIM"],
+                node_types=c["NODE_TYPES"],decoder_hidden=c["REC_DECODER_HIDDEN"],dropout=c["DROPOUT"]).to(c["device"])
+        training_model=torch.nn.ModuleDict({"graph":model, **({"reconstructor":rec} if rec is not None else {})})
         signature=identity(dict(plan=self.key,graph=graph_spec,seed=seed))
+        full=next(row for row in self.plan if row["name"]=="full")
+        full_graph={k:v for k,v in full.items() if k not in ("name","description","voxel","boundary","voxel_kind")}
+        original=c.get("stage1_checkpoint")
+        if seed==c["SEED"] and graph_spec==full_graph and original is not None and self.store.read(name) is None:
+            model.load_state_dict(original["model_state_dict"],strict=True)
+            if rec is not None: rec.load_state_dict(original["rec_state_dict"],strict=True)
+            save_imported_selection(self.store,name,signature,training_model,original.get("epochs_run",0),
+                original["best_epoch"],original["best_val_dice"],original.get("history",[]),
+                dict(precision="fp16" if c["device"].type=="cuda" else "fp32",microbatch=1,inference_batch=1),
+                c["LR"],c["WEIGHT_DECAY"],c["EPOCHS"],"unchanged Part 1 selected graph weights")
         def train_epoch(epoch,opt,scaler,runtime,deadline):
             loader=c["DataLoader"]([d for d,_ in groups["train"]],batch_size=c["BATCH_SIZE"],shuffle=True,num_workers=0,
                 generator=torch.Generator().manual_seed(seed+epoch))
@@ -534,17 +610,27 @@ class ResearchRunner:
                 deadline.check();batch=batch.to(c["device"]);opt.zero_grad(set_to_none=True)
                 teacher=c["structural_teacher_prob"](epoch,c["EPOCHS"]) if spec["structural"] else 0.
                 with torch.autocast(device_type=c["device"].type,dtype=torch.float16,enabled=c["device"].type=="cuda"):
-                    logits,aux=self.forward_graph(model,batch,teacher)
+                    clean=batch
+                    info=None
+                    lam=c["rec_lambda"](epoch) if rec is not None else 0.
+                    if rec is not None and lam>0 and not c["REC_SEPARATE_CLEAN_PASS"]:
+                        clean,info=c["mask_hetero_graph"](batch,rec,gen=None)
+                    logits,aux=self.forward_graph(model,clean,teacher)
                     loss=self.graph_loss(logits,batch,spec)
                     if aux is not None:
                         loss=loss+c["STRUCTURAL_AUX_WEIGHT"]*self.graph_loss(aux,batch,spec)
                     if spec["backbone"]=="hgt" and spec["hop_mode"]=="adaptive" and spec["hop_penalty"]:
                         base=model.base_model if hasattr(model,"base_model") else model
                         loss=loss+c["HOP_REG_WEIGHT"]*base.hop_regularization
+                    if rec is not None and lam>0:
+                        corrupt,info=c["mask_hetero_graph"](batch,rec,gen=None)
+                        output=model(corrupt,teacher_prob=0.) if hasattr(model,"base_model") else model(corrupt)
+                        reconstruction,_=c["reconstruction_loss"](rec,output[-1],info,batch,gen=None,device=c["device"])
+                        loss=loss+lam*reconstruction
                 if not torch.isfinite(loss):
                     raise FloatingPointError("Non-finite research graph loss")
                 scaler.scale(loss).backward();scaler.unscale_(opt)
-                torch.nn.utils.clip_grad_norm_(model.parameters(),2.,error_if_nonfinite=not scaler.is_enabled())
+                torch.nn.utils.clip_grad_norm_(training_model.parameters(),2.,error_if_nonfinite=not scaler.is_enabled())
                 scaler.step(opt);scaler.update();losses.append(float(loss.detach()))
             return dict(train_loss=float(np.mean(losses)))
         def validate(deadline):
@@ -555,10 +641,11 @@ class ResearchRunner:
                 scores.append(mean_region_dice(pred,meta["seg"]))
             return np.mean(scores)
         precision="fp16" if c["device"].type=="cuda" else "fp32"
-        state=train_phase(model,self.store,name,signature,epochs=c["EPOCHS"],patience=c["EARLY_STOP_PATIENCE"],lr=c["LR"],
+        state=train_phase(training_model,self.store,name,signature,epochs=c["EPOCHS"],patience=c["EARLY_STOP_PATIENCE"],lr=c["LR"],
             decay=c["WEIGHT_DECAY"],initial_precision=precision,calibrate=lambda saved:dict(precision=saved or precision,
                 torch_version=torch.__version__,cuda_version=torch.version.cuda,device=torch.cuda.get_device_name(c["device"]) if c["device"].type=="cuda" else "cpu"),
             train_epoch=train_epoch,validate=validate,deadline=self.deadline,push_every=c["CKPT_PUSH_EVERY_EPOCHS"])
+        state["reconstruction_parameters"]=sum(p.numel() for p in rec.parameters()) if rec is not None else 0
         return model,state,name
 
     def prior_loader(self,model):
@@ -568,6 +655,8 @@ class ResearchRunner:
         folder=self.store.path("priors/"+digest+"/marker").parent
         def prior(item,cached_only=False):
             path=folder/(case_id(item)+".npz")
+            if not path.exists() and not cached_only and hasattr(self.store,"catalog"):
+                self.store.pull("priors/"+digest+"/"+case_id(item)+".npz")
             if not path.exists():
                 if cached_only:
                     raise RuntimeError("Missing frozen prior before CPU preparation")
@@ -585,10 +674,17 @@ class ResearchRunner:
             graph_model.eval();graph_model.zero_grad(set_to_none=True)
             for parameter in graph_model.parameters():
                 parameter.requires_grad_(False)
-        head=c["VoxelRefinementHead"](len(c["MODALITIES"])+(c["NUM_CLASSES"] if graph_model is not None else 0),c["NUM_CLASSES"],c["VOXEL_BASE_CHANNELS"]).to(c["device"])
+        head=(IndependentUNet(len(c["MODALITIES"]),c["NUM_CLASSES"],8) if spec["voxel_kind"]=="unet" else
+              c["VoxelRefinementHead"](len(c["MODALITIES"])+(c["NUM_CLASSES"] if graph_model is not None else 0),c["NUM_CLASSES"],c["VOXEL_BASE_CHANNELS"])).to(c["device"])
         prior=self.prior_loader(graph_model)
         name=f"runs/{spec['name']}/seed_{seed}/voxel.pt"
         signature=identity(dict(plan=self.key,spec=spec,seed=seed,graph=model_digest(graph_model) if graph_model is not None else None))
+        original=c.get("MAIN_STAGE2_STATE")
+        if spec["name"]=="full" and seed==c["SEED"] and original is not None and self.store.read(name) is None:
+            head.load_state_dict(original["best_vox_state"],strict=True)
+            save_imported_selection(self.store,name,signature,head,original["epoch"],original["best_vox_epoch"],
+                original["best_vox_dice"],original["vox_history"],original["gpu_runtime"],
+                c["VOXEL_LR"],c["WEIGHT_DECAY"],c["VOXEL_EPOCHS"],"completed Part 2 selected voxel weights")
         def prepare(value):
             item,local_seed=value
             probs=prior(item,cached_only=True) if graph_model is not None else None
@@ -648,6 +744,7 @@ class ResearchRunner:
                 graph,state,name=self.fit_graph(spec,seed,groups)
                 checkpoints["graph"]=dict(name=name,sha256=sha256_path(self.store.path(name)))
                 protocols["graph"]=dict(best_epoch=state["best_epoch"],validation_dice=state["best_score"],history=state["history"],
+                    reconstruction_parameters=state.get("reconstruction_parameters",0),
                     parameters=sum(p.numel() for p in graph.parameters()),trained_parameters=sum(p.numel() for p in graph.parameters() if p.requires_grad),
                     best_weights_sha256=model_digest(graph))
             if spec["voxel"]:
@@ -676,6 +773,15 @@ class ResearchRunner:
         if self.manifest["debug"]:
             raise RuntimeError("Debug subsets cannot produce the final test report; use a full-cohort plan")
 
+    def evaluation_complete(self,spec,seed,split):
+        value=self.store.read(f"evaluation/{split}/{spec['name']}/seed_{seed}.json")
+        if not value or not value.get("complete"):return False
+        completed=self.completion(spec,seed)
+        ids=[row["case_id"] for row in value["patients"]]
+        if value["plan"]!=self.key or completed is None or value["checkpoints"]!=completed["checkpoints"] or len(ids)!=len(set(ids)) or set(ids)!=set(self.manifest["split"][split]):
+            raise RuntimeError("Completed evaluation identity mismatch")
+        return True
+
     def evaluate_run(self,spec,seed,groups,split):
         c=self.c;completed=self.completion(spec,seed)
         if completed is None:
@@ -684,6 +790,13 @@ class ResearchRunner:
             local=self.store.pull(checkpoint["name"])
             if local is None or sha256_path(local)!=checkpoint["sha256"]:
                 raise RuntimeError("Completed-run checkpoint changed or is missing")
+        prior_result=self.store.read(f"evaluation/{split}/{spec['name']}/seed_{seed}.json")
+        if prior_result and prior_result.get("complete"):
+            expected_ids=set(map(case_id,groups[split]))
+            ids=[row["case_id"] for row in prior_result["patients"]]
+            if prior_result["checkpoints"]!=completed["checkpoints"] or prior_result["plan"]!=self.key or len(ids)!=len(set(ids)) or set(ids)!=expected_ids:
+                raise RuntimeError("Completed evaluation does not match the frozen cohort/checkpoints")
+            return prior_result["patients"]
         graph=head=None
         if spec["backbone"]!="none":
             graph,_,_=self.fit_graph(spec,seed,groups)
@@ -879,6 +992,12 @@ class ResearchRunner:
                 if spec["name"] not in jobs:
                     continue
                 self.deadline.check()
+                if mode=="train" and all(self.completion(spec,seed) is not None for seed in active_seeds):
+                    status["finished_jobs"].extend(dict(experiment=spec["name"],seed=seed) for seed in active_seeds)
+                    continue
+                if mode!="train" and all(self.evaluation_complete(spec,seed,"test" if mode=="test" else "val") for seed in active_seeds):
+                    status["finished_jobs"].extend(dict(experiment=spec["name"],seed=seed) for seed in active_seeds)
+                    continue
                 groups=self.graphs(spec)
                 for seed in active_seeds:
                     self.deadline.check()
@@ -895,9 +1014,18 @@ class ResearchRunner:
         except BudgetPause as exc:
             status.update(paused=True,message=str(exc))
             print(str(exc))
+        status["scheduled_training_complete"]=all(self.completion(spec,seed) is not None
+            for spec in self.plan if spec["name"] in jobs for seed in active_seeds)
+        status["all_training_complete"]=all(self.completion(spec,seed) is not None for spec in self.plan for seed in self.seeds)
         self.store.save("session_status.json",status,push=True)
         return status
 
 
 def run_research(context,settings):
-    return ResearchRunner(context,settings).run()
+    runner=ResearchRunner(context,settings)
+    try:
+        return runner.run()
+    finally:
+        if hasattr(runner.store,"flush"):
+            runner.store.collect(runner.store.root/"priors","priors")
+            runner.store.flush()

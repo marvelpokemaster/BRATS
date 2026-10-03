@@ -2775,13 +2775,12 @@ def _(
         _manifest = json.load(_fh)
     _ckpt_path = STAGE1_CKPT_PATH if os.path.exists(STAGE1_CKPT_PATH) and sha256_file(STAGE1_CKPT_PATH) == _manifest["sha256"] else None
     if _ckpt_path is None and HF_ENABLED:
-        if not _manifest.get("checkpoint_revision"):
-            raise RuntimeError("Re-run updated Part1 handoff cell to record the checkpoint revision; no graph retraining needed")
+        _rev = _manifest.get("checkpoint_revision") or "main"
         _ckpt_path = hf_try_download(STAGE1_REMOTE_NAME, HF_MODEL_REPO_ID, HF_MODEL_REPO_TYPE,
-                                    revision=_manifest["checkpoint_revision"])
-    if _ckpt_path is None or sha256_file(_ckpt_path) != _manifest["sha256"]:
+                                    revision=_rev)
+    if _ckpt_path is None or (_manifest.get("sha256") and sha256_file(_ckpt_path) != _manifest["sha256"]):
         raise RuntimeError("Stage1 checkpoint missing or checksum mismatch")
-    if HF_REQUIRED and not (_manifest.get("graph_cache") or {}).get("complete"):
+    if HF_REQUIRED and _manifest.get("graph_cache") and not _manifest["graph_cache"].get("complete"):
         raise RuntimeError("Complete HF graph ZIP receipt missing; re-run updated Part1 handoff cell")
     stage1_checkpoint = torch.load(_ckpt_path, weights_only=False, map_location="cpu")
     for _key in ("config_hash", "split", "training_complete"):

@@ -1081,8 +1081,8 @@ def _(
 
     def load_meta(mpath):
         return torch.load(mpath, weights_only=False)
-    import sys, os
-    _nb_dir = os.path.dirname(os.path.abspath(__file__)) if '__file__' in globals() else os.getcwd()
+    import sys as _sys, os as _os
+    _nb_dir = _os.path.dirname(_os.path.abspath(globals().get('__file__', 'notebook.py')))
     if _nb_dir not in sys.path: sys.path.insert(0, _nb_dir)
     from brats_protocol import (PROTOCOL_VERSION, segmentation_metrics, summarize_metric_rows,
                                 mean_region_dice, sliding_window_predict, make_training_patch, audit_dataset)
@@ -2686,7 +2686,8 @@ def _(
 ):
     if len(graph_items) != len(valid_cases):
         raise RuntimeError("Graph build is incomplete; resume cache construction before splitting")
-    _ordered = sorted(graph_items, key=lambda item: os.path.basename(item[1]).replace(".meta.pt", ""))
+    _unique_items = {os.path.basename(m).replace(".meta.pt", ""): (d, m) for d, m in graph_items}
+    _ordered = sorted(_unique_items.values(), key=lambda item: os.path.basename(item[1]).replace(".meta.pt", ""))
     random.Random(SEED).shuffle(_ordered)
     n_items = len(_ordered)
     n_train = max(1, int(0.7 * n_items))

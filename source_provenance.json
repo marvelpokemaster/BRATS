@@ -1,0 +1,23 @@
+{
+  "version": "practical-v8",
+  "source_commit": "fa685319ced00fdfc9c48e263ea8e3e39b64caba",
+  "target_sessions": 5,
+  "session_limit_hours": 12,
+  "work_deadline_hours": 9.5,
+  "main_phase_seconds": 8100,
+  "pilot_phase_seconds": 2700,
+  "main_seeds": [
+    42
+  ],
+  "slic_pilot_train": 64,
+  "slic_pilot_validation": 16,
+  "main_graph_batch_effective": 8,
+  "main_graph_physical_cap": 8,
+  "adaptive_max_hops": 2,
+  "structural": false,
+  "masked_reconstruction": false,
+  "real_gpu_training": false,
+  "live_hub_writes": false,
+  "journal_readiness_certified": false,
+  "source_checkout_modified": false
+}

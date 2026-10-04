@@ -1,0 +1,2 @@
+# Existing Molab CUDA PyTorch/NumPy are retained. Install this with --no-deps.
+monai==1.5.1

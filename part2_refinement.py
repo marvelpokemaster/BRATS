@@ -17,8 +17,13 @@ app = marimo.App(auto_download=["html"])
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    # BraTS continuation: use after the running Part 1 completes
-    Read README.md. Leave Part 1 unchanged.
+    # Practical BraTS v8 — five-session compute plan
+
+    Fresh Part 1 is required. Keep all matching helpers beside the notebook and fill the blank HF token locally.
+    15k SLIC, HGT, learned 0–2 extra hops; structural refinement and reconstruction are off.
+    One seed; declared 135-minute model-training allowances, with best completed validation checkpoints.
+    A compute-budget stop is not convergence. See RUN_NEXT.md and ADVISOR_SCOPE.md before running.
+    Session work stops at 9.5 hours to reserve time for ZIP transfer. Individual operations/transfers are not preemptible.
     """)
     return
 
@@ -28,44 +33,6 @@ def _():
     import marimo as mo
 
     return (mo,)
-
-
-@app.cell(hide_code=True)
-def _(mo):
-    mo.md(r"""
-    # QoS-HRGN v2: Heterogeneous Adaptive Graph Learning for BraTS 3D Segmentation
-
-    **Pipeline**
-
-    `BraTS MRI → modality-specific 3D SLIC (T1ce / FLAIR partitions) → heterogeneous supervoxel graph → HGT → adaptive multi-hop propagation → pathology-aware prediction → voxel reconstruction`
-
-    **What changed from v1 (400-segment notebook) and why**
-
-    The v1 run showed node-level Dice ≈ 0.78 but voxel-level Dice of only WT 0.45 / TC 0.33 / ET 0.24.
-    That gap is a *graph-construction* problem, not a graph-learning problem. v2 fixes the construction:
-
-    | # | Change | Reason |
-    |---|---|---|
-    | 1 | `N_SEGMENTS` 400 → **15 000** (Saueressig et al. optimum on BraTS) | 400 supervoxels ≈ 15 mm bricks; ET is a thin rim of a few thousand voxels and cannot be drawn at that resolution. |
-    | 2 | Hard priority labels → **fractional (soft) labels** per node | Priority labelling made ET 3.7× more frequent than NCR at node level (opposite of reality) and painted whole bricks ET at reconstruction → low ET precision. |
-    | 3 | 6 single-modality features → **32 features from all four modalities** (mean, std, 5 quantiles each + position + size) | A T1ce node could not see FLAIR (edema) and vice-versa; T1/T2 were loaded and discarded. |
-    | 4 | Centroid-matched cross edges → **voxel-overlap cross edges** with overlap fraction as edge attribute | Overlap is the natural correspondence between two partitions of the same volume; gives 3–8 typed edges per node instead of 1. |
-    | 5 | **Oracle / ASA cells** | Reconstructing from ground-truth node labels shows the ceiling of a partition; if the ceiling is low the model cannot be blamed. |
-    | 6 | Model selection on **per-patient volume-weighted Dice** (= voxel Dice under node-constant predictions), ET small-volume post-processing, hidden 64→128, residual HGT, cosine LR, 80 epochs | v1 selected on batched node Dice which does not track voxel Dice. |
-
-    BraTS 2020 facts used here: 369 training cases (293 HGG, 76 LGG), 240×240×155 at 1 mm³, co-registered and skull-stripped; labels 0 = background, 1 = NCR/NET, 2 = ED, 4 = ET; evaluated on ET, TC = NCR/NET ∪ ET and WT = TC ∪ ED. Many LGG cases have **no ET at all**, which is why ET post-processing matters.
-    """)
-    return
-
-
-@app.cell(hide_code=True)
-def _(mo):
-    mo.md(r"""
-    ## 1. Imports and configuration
-
-    Every tunable lives in this cell. `N_SEGMENTS` and `COMPACTNESS` define the graph cache; changing either builds a new cache directory.
-    """)
-    return
 
 
 @app.cell
@@ -120,12 +87,12 @@ def _():
     HGT_LAYERS = 2
     HOPS = 2                    # fixed-hop baseline when USE_ADAPTIVE_HOPS=False
     USE_ADAPTIVE_HOPS = True    # proposed node-wise learned receptive-field depth
-    K_MAX = 4                   # candidate depths are k=0,...,K_MAX
+    K_MAX = 2
     HOP_REG_WEIGHT = 0.002      # small expected-hop cost; discourages always choosing K_MAX
     HOP_TEMPERATURE = 1.0       # softmax temperature; keep 1.0 for the main experiment
     DROPOUT = 0.1
     EPOCHS = 100
-    BATCH_SIZE = 64
+    BATCH_SIZE = 8
     LR = 1e-3
     WEIGHT_DECAY = 1e-4
     DICE_WEIGHT = 1.0
@@ -143,15 +110,15 @@ def _():
     VOXEL_LR = 1e-3
     VOXEL_BASE_CHANNELS = 32
     VOXEL_DICE_WEIGHT = 1.0
-    VOXEL_FOCAL_WEIGHT = 0.5
+    VOXEL_FOCAL_WEIGHT = 0.0
     VOXEL_FOCAL_GAMMA = 2.0
     VOXEL_CE_WEIGHT = 1.0
-    VOXEL_BOUNDARY_WEIGHT = 0.5
+    VOXEL_BOUNDARY_WEIGHT = 0.0
     VOXEL_MARGIN = 10
     VOXEL_MAX_SIZE = 128
 
     # ── Focal loss for the graph model ────────────────────────────
-    ET_FOCAL_WEIGHT = 0.5
+    ET_FOCAL_WEIGHT = 0.0
     FOCAL_GAMMA = 2.0
 
     # ── Connected-component post-processing ──────────────────────
@@ -240,23 +207,27 @@ def _():
     HGT_LAYERS = _saved_model["hgt_layers"]
     HOPS = _saved_model["hops"]
     USE_ADAPTIVE_HOPS = _saved_model["use_adaptive_hops"]
-    K_MAX = _saved_model["k_max"]
+    K_MAX = 2
     HOP_TEMPERATURE = _saved_model["hop_temperature"]
     DROPOUT = _saved_model["dropout"]
     EPOCHS = _saved_train["epochs"]
-    BATCH_SIZE = _saved_train["batch_size"]
+    BATCH_SIZE = 8
     LR = _saved_train["lr"]
     WEIGHT_DECAY = _saved_train["weight_decay"]
     DICE_WEIGHT = _saved_train["dice_weight"]
-    ET_FOCAL_WEIGHT = _saved_train["et_focal_weight"]
+    ET_FOCAL_WEIGHT = 0.0
     FOCAL_GAMMA = _saved_train["focal_gamma"]
     HOP_REG_WEIGHT = _saved_train["hop_reg_weight"]
     SEED = stage1_checkpoint["run_config"]["identity"]["seed"]
+
+    GRAPH_MAX_MICROBATCH = 8
+    GRAPH_MEMORY_FRACTION = 0.75
     return (
         BATCH_SIZE,
         COMPACTNESS,
         DICE_WEIGHT,
         DROPOUT,
+        DataLoader,
         EPOCHS,
         ET_FOCAL_WEIGHT,
         ET_MIN_VOXELS,
@@ -299,7 +270,6 @@ def _():
         USE_ADAPTIVE_HOPS,
         USE_AMP,
         USE_CC_POSTPROCESS,
-        USE_VOXEL_REFINEMENT,
         VOXEL_BASE_CHANNELS,
         VOXEL_BOUNDARY_WEIGHT,
         VOXEL_CE_WEIGHT,
@@ -325,13 +295,8 @@ def _():
         nn,
         np,
         os,
-        plt,
-        random,
-        restore_main,
         slic,
         stage1_checkpoint,
-        sync_main,
-        time,
         torch,
     )
 
@@ -342,7 +307,7 @@ def _():
     PART2_START_TIME = _time_mod.time()
     SESSION_HARD_CAP_HOURS = 12.0
     BUILD_BUDGET_HOURS = 3.0
-    TRAIN_BUDGET_HOURS = 9.5  # Leave 2.5 hours for ZIP creation/transfer and slow operations.
+    TRAIN_BUDGET_HOURS = 9.5
     CKPT_PUSH_EVERY_EPOCHS = 5
     RESUME_STAGE2 = True
     EARLY_STOP_PATIENCE = 15
@@ -352,17 +317,8 @@ def _():
         CKPT_PUSH_EVERY_EPOCHS,
         EARLY_STOP_PATIENCE,
         PART2_START_TIME,
-        RESUME_STAGE2,
         TRAIN_BUDGET_HOURS,
     )
-
-
-@app.cell(hide_code=True)
-def _(mo):
-    mo.md(r"""
-    ## 1b. Option B configuration
-    """)
-    return
 
 
 @app.cell
@@ -380,7 +336,7 @@ def _(EPOCHS, stage1_checkpoint):
     # We do NOT assume any structural relationship (e.g. "ET encloses NCR") is
     # a universal biological rule. These are measurable graph properties the
     # refinement module is free to learn to use, or to ignore.
-    USE_STRUCTURAL_REFINEMENT = True
+    USE_STRUCTURAL_REFINEMENT = False
     STRUCTURAL_USE_NEIGHBOR_STATS = True
     # Individual descriptor toggles, so ablations can show WHICH structural
     # signal (if any) actually helps.
@@ -424,7 +380,7 @@ def _(EPOCHS, stage1_checkpoint):
         return dim
     print(f'[Option B] USE_STRUCTURAL_REFINEMENT={USE_STRUCTURAL_REFINEMENT}  structural_dim={structural_descriptor_dim(STRUCTURAL_FLAGS)}  flags={STRUCTURAL_FLAGS}')  # tumour-neighbour fraction, ET-neighbour fraction  # hop-distance to nearest ET, hop-distance to nearest BG  # log1p(tumour connected-component size), normalised  # ET-neighbour fraction minus BG-neighbour fraction  # normalised cross-modal correspondence fan-out
     _saved_struct = stage1_checkpoint["run_config"]["identity"]["structural"]
-    USE_STRUCTURAL_REFINEMENT = _saved_struct["use_structural_refinement"]
+    USE_STRUCTURAL_REFINEMENT = False
     STRUCTURAL_FLAGS = dict(_saved_struct["structural_flags"])
     STRUCTURAL_HIDDEN = _saved_struct["structural_hidden"]
     STRUCTURAL_DROPOUT = _saved_struct["structural_dropout"]
@@ -434,23 +390,12 @@ def _(EPOCHS, stage1_checkpoint):
         STRUCTURAL_DROPOUT,
         STRUCTURAL_FLAGS,
         STRUCTURAL_HIDDEN,
+        STRUCTURAL_TEACHER_PROB_END,
+        STRUCTURAL_TEACHER_PROB_START,
         USE_STRUCTURAL_REFINEMENT,
         structural_descriptor_dim,
+        structural_teacher_prob,
     )
-
-
-@app.cell(hide_code=True)
-def _(mo):
-    mo.md(r"""
-    ## 1c. Option C configuration - heterogeneous masked graph reconstruction
-
-    Auxiliary self-supervised objective added on top of the existing segmentation task:
-
-    `L_total = L_segmentation + lambda_rec * L_reconstruction`
-
-    Set `USE_MASKED_RECONSTRUCTION = True` (default) to reproduce the exact baseline run.
-    """)
-    return
 
 
 @app.cell
@@ -467,7 +412,7 @@ def _(MODALITIES, NODE_FEAT_DIM, QUANTILES, stage1_checkpoint):
     #
     # Set USE_MASKED_RECONSTRUCTION = True to run the exact original baseline
     # (nothing in this cell affects that path).
-    USE_MASKED_RECONSTRUCTION = stage1_checkpoint["run_config"]["identity"]["rec"]["use_masked_reconstruction"]
+    USE_MASKED_RECONSTRUCTION = False
 
     LAMBDA_REC = 0.3            # weight of the auxiliary reconstruction loss
     REC_WARMUP_EPOCHS = 5       # linear ramp 0 -> LAMBDA_REC, so the aux task cannot
@@ -552,7 +497,10 @@ def _(MODALITIES, NODE_FEAT_DIM, QUANTILES, stage1_checkpoint):
         REC_MASK_RATE,
         REC_NEG_PER_POS,
         REC_SCE_GAMMA,
+        REC_SEPARATE_CLEAN_PASS,
+        REC_WARMUP_EPOCHS,
         USE_MASKED_RECONSTRUCTION,
+        rec_lambda,
     )
 
 
@@ -630,6 +578,7 @@ def _(
             "hop_temperature": HOP_TEMPERATURE, "dropout": DROPOUT, "num_classes": NUM_CLASSES,
         },
         "structural": {
+            "normalization": "per-patient-v7",
             "use_structural_refinement": USE_STRUCTURAL_REFINEMENT,
             "structural_flags": dict(STRUCTURAL_FLAGS), "structural_hidden": STRUCTURAL_HIDDEN,
             "structural_dropout": STRUCTURAL_DROPOUT,
@@ -643,12 +592,15 @@ def _(
     RUN_CONFIG = {
         "identity": IDENTITY_CONFIG,
         "train": {
+            "phase_seconds_limit": 8100, "compute_protocol": "practical-v8",
+            "graph_training_protocol": "practical-v8-patient-mean",
             "epochs": EPOCHS, "batch_size": BATCH_SIZE, "lr": LR, "weight_decay": WEIGHT_DECAY,
             "dice_weight": DICE_WEIGHT, "et_focal_weight": ET_FOCAL_WEIGHT, "focal_gamma": FOCAL_GAMMA,
             "amp": USE_AMP, "hop_reg_weight": HOP_REG_WEIGHT, "structural_aux_weight": STRUCTURAL_AUX_WEIGHT,
             "lambda_rec": LAMBDA_REC,
         },
         "voxel": {
+            "phase_seconds_limit": 8100, "compute_protocol": "practical-v8",
             "gpu_training_protocol": "v4-patient-mean-ce", "effective_batch_size": VOXEL_EFFECTIVE_BATCH_SIZE,
             "precision_policy": GPU_PRECISION,
             "voxel_epochs": VOXEL_EPOCHS, "voxel_lr": VOXEL_LR,
@@ -683,17 +635,7 @@ def _(
 
     CONFIG_HASH = config_hash(IDENTITY_CONFIG)
     print(f"[Run identity] CONFIG_HASH={CONFIG_HASH}")
-    return CONFIG_HASH, IDENTITY_CONFIG, RUN_CONFIG, config_hash
-
-
-@app.cell(hide_code=True)
-def _(mo):
-    mo.md(r"""
-    ## Local graph cache storage
-
-    Graphs (`*.graph.pt`, small, kept in RAM) and reconstruction metadata (`*.meta.pt`, large, loaded lazily) are stored separately.
-    """)
-    return
+    return IDENTITY_CONFIG, RUN_CONFIG, config_hash
 
 
 @app.cell
@@ -712,29 +654,6 @@ def _(
     return GRAPH_CACHE_BASE_PATH, PERSISTENT_BASE
 
 
-@app.cell(hide_code=True)
-def _(mo):
-    mo.md(r"""
-    ## 2. Download / discover BraTS 2021 Task 1 data
-
-    Switched from the BraTS 2020 Kaggle mirror (369 cases) to
-    [`dschettler8845/brats-2021-task1`](https://www.kaggle.com/datasets/dschettler8845/brats-2021-task1)
-    (~1,251 training cases, ~12.3 GB compressed). File naming
-    (`BraTS2021_XXXXX_{t1,t1ce,t2,flair,seg}.nii.gz`, all under a
-    `BraTS2021_Training_Data/` folder) follows the same underscore-delimited
-    convention the modality-detection regex below already handles, so no
-    parsing logic changed -- only the dataset slug.
-
-    The much larger case count means: (a) SLIC graph construction and the
-    graph cache scale up roughly 3.4x versus BraTS 2020, and (b) raw dataset +
-    graph cache can meaningfully strain local disk on constrained environments
-    (Colab, etc.) -- see §2b for an optional Hugging Face Hub remote cache
-    that addresses this. Set `MAX_CASES` in §1 while debugging to avoid
-    downloading/processing the full set.
-    """)
-    return
-
-
 @app.cell
 def _(EXPECTED_CASES, GRAPH_CACHE_BASE_PATH, os, stage1_checkpoint):
     # Part 1 already audited the data. Its verified graph ZIP contains the MRI
@@ -751,29 +670,13 @@ def _(EXPECTED_CASES, GRAPH_CACHE_BASE_PATH, os, stage1_checkpoint):
     valid_cases = [(cid,{"t1":os.path.join(GRAPH_CACHE_PATH,cid,cid+"_t1.nii.gz")}) for cid in sorted(_saved_ids)]
     MAX_CASES = None
     print("Using Part 1's audited cohort and verified graph archive:",len(valid_cases),"patients")
-    return DATASET_AUDIT, DATASET_FINGERPRINT, GRAPH_CACHE_PATH, valid_cases
-
-
-@app.cell(hide_code=True)
-def _(mo):
-    mo.md(r"""
-    ## 2b. Optional: Hugging Face Hub remote graph cache
-
-    BraTS 2021's ~1,251 cases (vs. 369 for BraTS 2020) make the local SLIC
-    graph cache substantially larger. Hugging Face Hub gives free accounts
-    generous storage for public dataset repos, so this optionally uses a HF
-    dataset repo as a REMOTE cache for the built graphs (`*.graph.pt` /
-    `*.meta.pt`): before building a case locally, the cache-build cell (§10)
-    checks the the single ZIP archive first and skips local SLIC entirely if it's
-    already cached there; after the complete cache is built, it uploads one `ZIP_STORED` archive;
-    later runs can pull and resume extraction instead of rebuilding.
-
-    Set `HF_TOKEN` in the environment (or use the stored Hugging Face login);
-    the notebook contains no credential. With no token, the cache remains
-    local-only. Training resumes from `stage1_latest.pt` or
-    `stage2_latest.pt` when those rolling checkpoints are available.
-    """)
-    return
+    return (
+        DATASET_AUDIT,
+        DATASET_FINGERPRINT,
+        GRAPH_CACHE_PATH,
+        RAW_SOURCE_AVAILABLE,
+        valid_cases,
+    )
 
 
 @app.cell
@@ -848,20 +751,11 @@ def _(
         HF_REPO_TYPE,
         MAIN_STORE,
         STAGE2_LATEST_NAME,
-        STAGE2_LATEST_PATH,
         hf_try_download,
         hf_upload_file_verified,
+        hf_upload_receipt,
+        research_store_factory,
     )
-
-
-@app.cell(hide_code=True)
-def _(mo):
-    mo.md(r"""
-    ## 3. Utility functions
-
-    Each modality is z-scored inside the brain mask. SLIC is only a **regionalisation step**; labels are voxel fractions per node.
-    """)
-    return
 
 
 @app.cell
@@ -1014,49 +908,16 @@ def _(
     return (
         NUM_CLASSES,
         PROTOCOL_VERSION,
-        amp_context,
-        bounded_prefetch,
-        configure_gpu,
         crop,
         crop_bounds,
         extract_verified_zip,
-        fmt_metrics,
         load_case,
         load_meta,
-        make_training_patch,
-        mean_region_dice,
-        patient_groups,
         postprocess_prediction_auto,
         segmentation_metrics,
         sliding_window_predict,
-        summarize_metric_rows,
-        train_patient_group,
         write_json_atomic,
     )
-
-
-@app.cell(hide_code=True)
-def _(mo):
-    mo.md(r"""
-    ## 4. Build the heterogeneous supervoxel graph (vectorised)
-
-    Two node types, each a separate SLIC partition of the *same* cropped brain:
-
-    - `t1ce`: supervoxels whose boundaries follow T1ce contrast (ET / NCR boundaries).
-    - `flair`: supervoxels whose boundaries follow FLAIR contrast (edema boundary).
-
-    Relations:
-
-    - `t1ce --spatial--> t1ce`, `flair --spatial--> flair`: face-adjacent supervoxels. Edge attributes `[normalised centroid distance, normalised shared-face count]`.
-    - `t1ce --corresponds--> flair` and back: supervoxels that **overlap in voxel space**. Edge attributes `[normalised centroid distance, overlap / min(volume)]`.
-
-    Per node (32 features): for each of T1, T1ce, T2, FLAIR → mean, std and the 10/25/50/75/90 % quantiles of the voxels inside the supervoxel; plus normalised centroid (3) and log relative volume (1).
-
-    Per node targets: `y_frac` (fraction of voxels in each of BG / NCR-NET / ED / ET), `y` (majority class, for reporting only), `vol` (fraction of brain voxels, used to volume-weight the Dice loss so it equals voxel Dice).
-
-    Everything is `bincount`/`lexsort` based — no per-supervoxel Python loops — so 15 000 nodes cost about the same as 400 did in v1.
-    """)
-    return
 
 
 @app.cell
@@ -1202,18 +1063,6 @@ def _(
     return (build_hetero_case,)
 
 
-@app.cell(hide_code=True)
-def _(mo):
-    mo.md(r"""
-    ## 5. Voxel reconstruction and the oracle (achievable segmentation accuracy)
-
-    `project_node_probs` paints each node's 4-class probability vector onto its supervoxel for both partitions, averages where both cover a voxel, and takes the arg-max.
-
-    The **oracle** feeds the *ground-truth* node fractions through the same projection. Its Dice is the upper bound any node classifier can reach on this partition. If the oracle is low, the fix is graph construction, not the model.
-    """)
-    return
-
-
 @app.cell
 def _(
     NODE_TYPES,
@@ -1273,29 +1122,7 @@ def _(
         pred = project_node_probs(predict_node_probs(model, data), meta)
         return postprocess_prediction_auto(pred) if postprocess else pred
 
-    return predict_node_probs, reconstruct_case
-
-
-@app.cell(hide_code=True)
-def _(mo):
-    mo.md(r"""
-    ## 8. HGT + adaptive multi-hop propagation
-
-    ### HGT
-    `HGTConv` is the heterogeneous backbone: separate node types, typed relations. v2 wraps each layer with a residual connection and LayerNorm so two layers train stably at `hidden_dim=128`.
-
-    ### Adaptive propagation
-    After HGT, an adaptive message weight is computed for every edge from
-
-    - source / destination embeddings
-    - the edge attributes (distance and contact/overlap strength)
-    - feature cosine similarity
-    - cross-modal relation indicator
-    - current prediction uncertainty (normalised entropy)
-
-    Messages are gate-normalised (attention-style) rather than summed raw. Applied `HOPS` times, so information can travel beyond immediate neighbours. Set `HOPS = 0` for the *HGT-only* ablation.
-    """)
-    return
+    return predict_node_probs, project_node_probs
 
 
 @app.cell
@@ -1426,7 +1253,9 @@ def _(
             gate_history = []
             current = x_dict
             for _ in range(self.k_max):
-                current, gates = self.adaptive_prop(
+                from torch.utils.checkpoint import checkpoint as _checkpoint
+                _propagate = (lambda *args, **kwargs: _checkpoint(self.adaptive_prop, *args, use_reentrant=False, **kwargs)) if self.training and torch.is_grad_enabled() else self.adaptive_prop
+                current, gates = _propagate(
                     current, edge_index_dict, edge_attr_dict, logits_states[-1], return_gates=True)
                 states.append({nt: current[nt] for nt in NODE_TYPES})
                 logits_states.append({nt: self.pre_head[nt](current[nt]) for nt in NODE_TYPES})
@@ -1448,6 +1277,7 @@ def _(
                 mixed[nt] = sum(beta[:, k:k + 1] * states[k][nt] for k in range(self.k_max + 1))
                 hop_values = torch.arange(self.k_max + 1, device=beta.device, dtype=beta.dtype)
                 effective = (beta * hop_values.unsqueeze(0)).sum(dim=1)
+                self.hop_regularization_by_node[nt] = effective
                 expected_terms.append(effective.mean())
                 hop_info[nt] = {
                     "weights": beta.detach(),
@@ -1460,6 +1290,7 @@ def _(
             return mixed
 
         def forward(self, data):
+            self.hop_regularization_by_node = {}
             x_dict = {nt: self.input_proj[nt](data[nt].x) for nt in NODE_TYPES}
             edge_index_dict = {et: data[et].edge_index for et in self.metadata[1]}
             edge_attr_dict = {et: data[et].edge_attr for et in self.metadata[1]}
@@ -1483,24 +1314,6 @@ def _(
             return final_logits, x_dict
 
     return (QoSHRGN,)
-
-
-@app.cell(hide_code=True)
-def _(mo):
-    mo.md(r"""
-    ## 8d. Voxel refinement head (3D U-Net)
-
-    The supervoxel oracle ceiling for ET is 0.7243 at 15k segments — **even a perfect
-    node classifier cannot reach 0.8** because ET and NCR/NET are mixed within the same
-    supervoxels. A voxel-level refinement head breaks this ceiling by discriminating
-    *within* supervoxels using the original MRI intensity at full voxel resolution.
-
-    **Input:** 4 MRI modalities + 4 projected node probability maps = 8 channels.
-    **Output:** 4-class voxel-level logits.
-    **Architecture:** lightweight 3D U-Net (2 downsample levels, ~1M params).
-    **Training:** two-stage — graph model is frozen, only the voxel head is trained.
-    """)
-    return
 
 
 @app.cell
@@ -1648,33 +1461,6 @@ def _(
         return postprocess_prediction_auto(pred) if postprocess else pred
 
     return VoxelRefinementHead, voxel_loss
-
-
-@app.cell(hide_code=True)
-def _(mo):
-    mo.md(r"""
-    ## 8c. Option C: masking operators and heterogeneous reconstruction heads
-
-    **What is masked.** A fraction `REC_MASK_RATE` of nodes (independently in each partition) has its
-    entire 28-dim *appearance* block replaced by a learnable per-node-type `[MASK]` token; the 4 geometry
-    dims are kept. A fraction `REC_EDGE_MASK_RATE` of `t1ce <-> flair` correspondence edges is removed
-    from message passing (in **both** mirrored directions) and held out as positives.
-
-    **What is reconstructed.**
-
-    1. *Masked node appearance* - per-node-type MLP decoder on the final embedding. The node's own
-       appearance never entered the encoder, so the only information routes are spatial neighbours and
-       the cross-modal correspondence partner. No leakage, hence no re-masking trick needed.
-    2. *T1ce <-> FLAIR correspondence* - relation-specific scorer on `(h_t1ce, h_flair)`. Negatives are
-       **distance-matched hard negatives**: for a held-out positive `(i, j)` we sample `(i, j')` where
-       `j'` is a spatial neighbour of the true partner `j`. `j'` lies in the same neighbourhood at
-       comparable distance from `i`, which removes the geometric shortcut and forces the model to judge
-       whether the two partitions actually *align* there.
-
-    Heterogeneity is respected throughout: separate mask tokens, separate feature decoders per node
-    type, and separate scorers per relation.
-    """)
-    return
 
 
 @app.cell
@@ -1927,17 +1713,7 @@ def _(
         parts["total"] = float(total.detach())
         return total, parts
 
-    return (HeteroMaskedReconstructor,)
-
-
-@app.cell(hide_code=True)
-def _(mo):
-    mo.md(r"""
-    ## 9b. Option B: structure-aware graph refinement (research ablation)
-
-    After the base model's HGT + adaptive propagation produce initial node predictions, this optional module analyses the STRUCTURE of that predicted tumour graph (neighbour-class fractions, hop-distance to nearest ET/BG, tumour connected-component size, enclosure score, cross-modal fan-out) and uses it to refine the final classification. Controlled by `USE_STRUCTURAL_REFINEMENT` (True in this bundle); the baseline model/training/eval below is completely unaffected when disabled.
-    """)
-    return
+    return HeteroMaskedReconstructor, mask_hetero_graph, reconstruction_loss
 
 
 @app.cell
@@ -2123,25 +1899,13 @@ def _(
                 else:
                     struct_class = pred_class
                 cross_src_index = data[nt, 'corresponds', other_nt].edge_index
-                s = compute_structural_descriptors(edge_index, num_nodes, struct_class, cross_src_index, self.flags, dev)
+                from brats_graph import patient_descriptors as _patient_descriptors
+                s = _patient_descriptors(data, nt, struct_class, cross_src_index, self.flags, compute_structural_descriptors)
                 h = x_dict[nt]
                 final_logits[nt] = self.refine[nt](h, init_prob, s, initial_logits[nt])
             return (initial_logits, final_logits, x_dict)  # Scheduled sampling: mix GT-derived and model-predicted  # structure during TRAINING ONLY. Never at eval/test.  # eval/test: predictions only -- no GT leakage.
 
     return (StructuralQoSHRGN,)
-
-
-@app.cell(hide_code=True)
-def _(mo):
-    mo.md(r"""
-    ## 9. Pathology-aware loss on fractional labels
-
-    - **Soft cross-entropy**: `-Σ_c w_c · y_frac_c · log p_c`, so a node that is 60 % ED / 40 % ET is not forced to pick one.
-    - **Volume-weighted region Dice** for WT / TC / ET computed *per patient*. Because every voxel in a supervoxel receives the node's prediction, `Σ_nodes vol·p·g` is exactly the voxel-level soft Dice — the loss now optimises the metric BraTS reports.
-
-    `ET = class 3`, `TC = NCR/NET ∪ ET`, `WT = NCR/NET ∪ ED ∪ ET`, as in the BraTS definition.
-    """)
-    return
 
 
 @app.cell
@@ -2184,15 +1948,9 @@ def _(
         return -(y_frac.float() * (1 - p) ** gamma * logp).sum(dim=-1).mean()
 
     def hierarchy_loss(logits, data_nt, num_graphs, class_weights=None, dice_weight=DICE_WEIGHT):
-        ce = soft_cross_entropy(logits, data_nt.y_frac, class_weights)
-        probs = torch.softmax(logits.float(), dim=-1)
-        batch = data_nt.batch if hasattr(data_nt, "batch") and data_nt.batch is not None else torch.zeros(
-            probs.size(0), dtype=torch.long, device=probs.device)
-        d = region_dice_loss(probs, data_nt.y_frac, data_nt.vol, batch, num_graphs)
-        loss = ce + dice_weight * d
-        if ET_FOCAL_WEIGHT > 0:
-            loss = loss + ET_FOCAL_WEIGHT * focal_loss_soft(logits, data_nt.y_frac, gamma=FOCAL_GAMMA)
-        return loss
+        from brats_graph import patient_hierarchy_loss as _patient_hierarchy_loss
+        return _patient_hierarchy_loss(logits, data_nt, num_graphs, class_weights, dice_weight,
+            soft_cross_entropy, region_dice_loss, focal_loss_soft, ET_FOCAL_WEIGHT, FOCAL_GAMMA)
 
     @torch.no_grad()
     def node_region_dice(logits_dict, data, eps=1e-7):
@@ -2212,17 +1970,7 @@ def _(
         dice = (2.0 * inter + eps) / (den + eps)             # [3, num_graphs]
         return dice.mean(dim=0)                               # per patient
 
-    return
-
-
-@app.cell(hide_code=True)
-def _(mo):
-    mo.md(r"""
-    ## 10. Build the dataset graphs
-
-    Graphs are built in parallel and cached. Each worker saves its own files (`*.graph.pt` ≈ a few MB, `*.meta.pt` ≈ 50 MB) so nothing large is shipped back to the main process. Only the graphs are kept in memory; metadata is loaded lazily during evaluation.
-    """)
-    return
+    return focal_loss_soft, region_dice_loss, soft_cross_entropy
 
 
 @app.cell
@@ -2337,17 +2085,7 @@ def _(
         print(f"Nodes per graph (both types): mean={np.mean(_nodes):.0f}  min={np.min(_nodes)}  max={np.max(_nodes)}")
     if not graph_build_complete:
         raise RuntimeError("Graph cache is incomplete; refusing to train on a non-reproducible partial set.")
-    return (graph_items_by_case,)
-
-
-@app.cell(hide_code=True)
-def _(mo):
-    mo.md(r"""
-    ## 11. Patient-level train / validation / test split and class weights
-
-    Split by **patient**. Class weights come from *voxel* fractions (`Σ vol · y_frac`) rather than node counts, so the priority-labelling distortion of v1 cannot happen. Square-root inverse frequency keeps them moderate; the Dice term handles the rest of the imbalance.
-    """)
-    return
+    return build_and_save, get_case_id, graph_items_by_case
 
 
 @app.cell
@@ -2373,22 +2111,10 @@ def _(device, graph_items_by_case, hashlib, json, stage1_checkpoint):
         SPLIT_CASE_IDS,
         SPLIT_FINGERPRINT,
         class_weights,
+        test_items,
         train_items,
         val_items,
     )
-
-
-@app.cell(hide_code=True)
-def _(mo):
-    mo.md(r"""
-    ## 12. Load the Stage-1 graph model (trained in Part 1)
-
-    Part 1 already trained and validated the graph model (QoS-HRGN + Option B/C
-    modules) and pushed a checkpoint to the Hub. This session reconstructs the
-    *same* architecture from the config cells above, then loads those weights --
-    it does not retrain the graph model.
-    """)
-    return
 
 
 @app.cell
@@ -2475,48 +2201,80 @@ def _(
     test_metrics = stage1_checkpoint.get("test_metrics",{})
     print("Verified unchanged Part 1 selected model:",STAGE1_MODEL_SHA256[:16])
     STAGE1_LOADED = True
-    return (model,)
-
-
-@app.cell(hide_code=True)
-def _(mo):
-    mo.md(r"""
-    ## Part 2: refinement training only
-    """)
     return
 
 
 @app.cell
 def _(
+    APPEARANCE_DIM,
+    BATCH_SIZE,
     CKPT_PUSH_EVERY_EPOCHS,
-    CONFIG_HASH,
+    COMPACTNESS,
     DATASET_FINGERPRINT,
+    DICE_WEIGHT,
+    DROPOUT,
+    DataLoader,
     EARLY_STOP_PATIENCE,
+    EPOCHS,
+    ET_FOCAL_WEIGHT,
+    ET_MIN_VOXELS,
+    FOCAL_GAMMA,
     GPU_AUTOTUNE,
     GPU_MEMORY_FRACTION,
     GPU_PRECISION,
+    HEADS,
     HF_ENABLED,
     HF_MODEL_REPO_ID,
     HF_MODEL_REPO_TYPE,
+    HGT_LAYERS,
+    HIDDEN_DIM,
+    HOPS,
+    HOP_REG_WEIGHT,
+    HOP_TEMPERATURE,
+    HeteroMaskedReconstructor,
     INFERENCE_MAX_BATCH,
     INFERENCE_OVERLAP,
+    K_MAX,
+    LAMBDA_REC,
+    LR,
     MAIN_STORE,
     MODALITIES,
+    NODE_FEAT_DIM,
+    NODE_TYPES,
     NUM_CLASSES,
+    N_SEGMENTS,
     PART2_START_TIME,
     PERSISTENT_BASE,
-    PROTOCOL_VERSION,
-    RESUME_STAGE2,
+    QoSHRGN,
+    RAW_SOURCE_AVAILABLE,
+    REC_DECODER_HIDDEN,
+    REC_EDGE_MASK_RATE,
+    REC_FEAT_LOSS,
+    REC_FLAGS,
+    REC_MASK_RATE,
+    REC_NEG_PER_POS,
+    REC_SCE_GAMMA,
+    REC_SEPARATE_CLEAN_PASS,
+    REC_WARMUP_EPOCHS,
     RUN_CONFIG,
     SEED,
+    SLIC_ITERS,
     SPLIT_CASE_IDS,
     SPLIT_FINGERPRINT,
     STAGE1_MODEL_SHA256,
     STAGE2_LATEST_NAME,
-    STAGE2_LATEST_PATH,
+    STRUCTURAL_AUX_WEIGHT,
+    STRUCTURAL_DROPOUT,
+    STRUCTURAL_FLAGS,
+    STRUCTURAL_HIDDEN,
+    STRUCTURAL_TEACHER_PROB_END,
+    STRUCTURAL_TEACHER_PROB_START,
+    StructuralQoSHRGN,
     TRAIN_BUDGET_HOURS,
-    USE_AMP,
-    USE_VOXEL_REFINEMENT,
+    USE_ADAPTIVE_HOPS,
+    USE_CC_POSTPROCESS,
+    USE_MASKED_RECONSTRUCTION,
+    USE_STRUCTURAL_REFINEMENT,
     VOXEL_BASE_CHANNELS,
     VOXEL_BOUNDARY_WEIGHT,
     VOXEL_CE_WEIGHT,
@@ -2531,377 +2289,182 @@ def _(
     VOXEL_PREFETCH_WORKERS,
     VoxelRefinementHead,
     WEIGHT_DECAY,
-    amp_context,
-    bounded_prefetch,
+    build_and_save,
     class_weights,
-    configure_gpu,
     device,
-    fmt_metrics,
-    hashlib,
+    focal_loss_soft,
+    get_case_id,
+    hf_try_download,
     hf_upload_file_verified,
-    json,
+    hf_upload_receipt,
     load_meta,
-    make_training_patch,
-    mean_region_dice,
+    mask_hetero_graph,
     mo,
-    model,
-    np,
-    os,
-    patient_groups,
     postprocess_prediction_auto,
-    predict_node_probs,
-    random,
-    reconstruct_case,
-    restore_main,
-    segmentation_metrics,
-    sliding_window_predict,
-    summarize_metric_rows,
-    sync_main,
-    time,
-    torch,
-    train_items,
-    train_patient_group,
-    val_items,
-    voxel_loss,
-    write_json_atomic,
-):
-    restore_main(MAIN_STORE,PERSISTENT_BASE,STAGE2_LATEST_NAME,STAGE1_MODEL_SHA256)
-    try:
-        # Stage 2: frozen graph prior, on-demand disk cache, full-volume selection.
-        def stage2_node_probs(data, meta_path, cached_only=False):
-            _key = hashlib.sha256((STAGE1_MODEL_SHA256 + DATASET_FINGERPRINT + os.path.basename(meta_path)).encode()).hexdigest()
-            _cache_dir = os.path.join(PERSISTENT_BASE, "node_probs", STAGE1_MODEL_SHA256[:16])
-            os.makedirs(_cache_dir, exist_ok=True)
-            _path = os.path.join(_cache_dir, _key + ".npz")
-            if not os.path.exists(_path):
-                if cached_only:
-                    raise RuntimeError("Frozen node cache is missing; resume the cache warmup before threaded preparation")
-                _probs = predict_node_probs(model, data)
-                with open(_path + ".tmp", "wb") as _fh:
-                    np.savez_compressed(_fh, **_probs)
-                os.replace(_path + ".tmp", _path)
-            with np.load(_path, allow_pickle=False) as _z:
-                return {k: _z[k].copy() for k in _z.files}
-    
-    
-        def stage2_predict(data, meta_path, meta):
-            _pred = sliding_window_predict(voxel_head, meta, stage2_node_probs(data, meta_path),
-                                           roi=VOXEL_MAX_SIZE, overlap=INFERENCE_OVERLAP)
-            return postprocess_prediction_auto(_pred)
-    
-    
-        def evaluate_items_voxel(items, name="Set"):
-            _rows = {"graph": [], "voxel": []}
-            _patient_rows = []
-            for _data, _mpath in items:
-                _meta = load_meta(_mpath)
-                _graph = reconstruct_case(model, _data, _meta)
-                _hybrid = stage2_predict(_data, _mpath, _meta)
-                _mg = segmentation_metrics(_graph, _meta["seg"])
-                _mv = segmentation_metrics(_hybrid, _meta["seg"])
-                _rows["graph"].append(_mg); _rows["voxel"].append(_mv)
-                _patient_rows.append({"case_id": os.path.basename(_mpath).replace(".meta.pt", ""),
-                                      "graph": _mg, "voxel": _mv})
-                print(f"{name}: graph {fmt_metrics(_mg)} | hybrid {fmt_metrics(_mv)}")
-            _summary = {k: summarize_metric_rows(v) for k, v in _rows.items()}
-            with open(os.path.join(PERSISTENT_BASE, name.lower() + "_patient_metrics.json"), "w") as _fh:
-                json.dump({"summary": _summary, "patients": _patient_rows,
-                           "protocol": PROTOCOL_VERSION, "stage1_sha256": STAGE1_MODEL_SHA256}, _fh, indent=2)
-            return _summary
-    
-    
-        voxel_head = None
-        vox_history = []
-        best_vox_dice = -1.0
-        best_vox_epoch = 0
-        best_vox_state = None
-        vox_epochs_since_improve = 0
-        stage2_training_complete = not USE_VOXEL_REFINEMENT
-        val_vox_metrics = None
-        test_vox_metrics = None
-    
-        if USE_VOXEL_REFINEMENT:
-            random.seed(SEED); np.random.seed(SEED); torch.manual_seed(SEED)
-            if USE_AMP:
-                torch.cuda.manual_seed_all(SEED)
-            model.eval()
-            for _parameter in model.parameters():
-                _parameter.requires_grad_(False)
-            voxel_head = VoxelRefinementHead(len(MODALITIES) + NUM_CLASSES, NUM_CLASSES, VOXEL_BASE_CHANNELS).to(device)
-            voxel_optimizer = torch.optim.AdamW(voxel_head.parameters(), lr=VOXEL_LR, weight_decay=WEIGHT_DECAY)
-            voxel_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(voxel_optimizer, T_max=VOXEL_EPOCHS, eta_min=VOXEL_LR * .02)
-            _gpu_runtime = configure_gpu(voxel_head, np.zeros((len(MODALITIES) + NUM_CLASSES, 4, 4, 4), np.float32),
-                                         precision=GPU_PRECISION, autotune=False)
-            _gpu_runtime["precision_validated"] = False
-            voxel_scaler = torch.amp.GradScaler("cuda", enabled=USE_AMP and _gpu_runtime["precision"] == "fp16")
-            _class_weights_dev = class_weights.to(device)
-    
-            def stage2_state(epoch, complete):
-                return {"epoch": epoch, "training_complete": complete, "protocol": PROTOCOL_VERSION,
-                        "config_hash": CONFIG_HASH, "split": SPLIT_CASE_IDS, "split_fingerprint": SPLIT_FINGERPRINT,
-                        "dataset_fingerprint": DATASET_FINGERPRINT, "stage1_sha256": STAGE1_MODEL_SHA256,
-                        "stage2_config": RUN_CONFIG["voxel"],
-                        "gpu_runtime": _gpu_runtime,
-                        "voxel_state_dict": {k: v.detach().cpu().clone() for k, v in voxel_head.state_dict().items()},
-                        "optimizer_state_dict": voxel_optimizer.state_dict(), "scheduler_state_dict": voxel_scheduler.state_dict(),
-                        "scaler_state_dict": voxel_scaler.state_dict(),
-                        "rng": {"torch": torch.get_rng_state(), "numpy": np.random.get_state(),
-                                "python": random.getstate(), "cuda": torch.cuda.get_rng_state_all() if USE_AMP else None},
-                        "vox_history": vox_history, "best_vox_dice": best_vox_dice, "best_vox_epoch": best_vox_epoch,
-                        "best_vox_state": best_vox_state, "vox_epochs_since_improve": vox_epochs_since_improve}
-    
-            def save_stage2(epoch, complete, push=False):
-                torch.save(stage2_state(epoch, complete), STAGE2_LATEST_PATH + ".tmp")
-                os.replace(STAGE2_LATEST_PATH + ".tmp", STAGE2_LATEST_PATH)
-                if HF_ENABLED:
-                    hf_upload_file_verified(STAGE2_LATEST_PATH, STAGE2_LATEST_NAME, HF_MODEL_REPO_ID,
-                                            HF_MODEL_REPO_TYPE, f"review stage2 epoch {epoch}")
-    
-            _start_epoch = 1
-            _resume_path = None
-            if RESUME_STAGE2:
-                _resume_path = STAGE2_LATEST_PATH if os.path.exists(STAGE2_LATEST_PATH) else MAIN_STORE.pull(STAGE2_LATEST_NAME)
-            if _resume_path:
-                _latest = torch.load(_resume_path, map_location="cpu", weights_only=False)
-                for _key, _expected in {"protocol": PROTOCOL_VERSION, "config_hash": CONFIG_HASH,
-                                        "split": SPLIT_CASE_IDS, "split_fingerprint": SPLIT_FINGERPRINT,
-                                        "dataset_fingerprint": DATASET_FINGERPRINT, "stage1_sha256": STAGE1_MODEL_SHA256,
-                                        "stage2_config": RUN_CONFIG["voxel"]}.items():
-                    if _latest.get(_key) != _expected:
-                        raise RuntimeError(f"Stage2 resume mismatch: {_key}; use a fresh checkpoint")
-                # A pause during frozen-cache warmup has not trained this head yet.
-                # Permit the first real calibration to choose FP32 if AMP is unstable.
-                _saved_precision = (_latest.get("gpu_runtime", {}).get("precision")
-                    if _latest["epoch"] > 0 or _latest.get("gpu_runtime", {}).get("precision_validated", False) else None)
-                _gpu_runtime = configure_gpu(voxel_head, np.zeros((len(MODALITIES) + NUM_CLASSES, 4, 4, 4), np.float32),
-                                             precision=GPU_PRECISION, autotune=False, resume_precision=_saved_precision)
-                if _saved_precision is not None and _saved_precision != _gpu_runtime["precision"]:
-                    raise RuntimeError("Resume requires the saved numeric precision on a compatible GPU")
-                _gpu_runtime["precision_validated"] = _saved_precision is not None
-                voxel_scaler = torch.amp.GradScaler("cuda", enabled=USE_AMP and _gpu_runtime["precision"] == "fp16")
-                voxel_head.load_state_dict(_latest["voxel_state_dict"])
-                voxel_optimizer.load_state_dict(_latest["optimizer_state_dict"])
-                voxel_scheduler.load_state_dict(_latest["scheduler_state_dict"])
-                voxel_scaler.load_state_dict(_latest["scaler_state_dict"])
-                torch.set_rng_state(_latest["rng"]["torch"])
-                np.random.set_state(_latest["rng"]["numpy"])
-                random.setstate(_latest["rng"]["python"])
-                if USE_AMP and _latest["rng"]["cuda"] is not None:
-                    torch.cuda.set_rng_state_all(_latest["rng"]["cuda"])
-                vox_history = _latest["vox_history"]
-                best_vox_dice, best_vox_epoch = _latest["best_vox_dice"], _latest["best_vox_epoch"]
-                best_vox_state = _latest["best_vox_state"]
-                vox_epochs_since_improve = _latest["vox_epochs_since_improve"]
-                stage2_training_complete = _latest["training_complete"]
-                _start_epoch = _latest["epoch"] + 1
-            else:
-                save_stage2(0, False, push=True)
-    
-            def _stage2_loss(output, target):
-                _logits, _boundary = output
-                return voxel_loss(_logits, target, _class_weights_dev, dice_weight=VOXEL_DICE_WEIGHT,
-                                  ce_weight=VOXEL_CE_WEIGHT, focal_weight=VOXEL_FOCAL_WEIGHT,
-                                  focal_gamma=VOXEL_FOCAL_GAMMA, boundary_logits=_boundary,
-                                  boundary_weight=VOXEL_BOUNDARY_WEIGHT)
-    
-            # Build only compact frozen probabilities before CPU workers start. Workers
-            # never invoke CUDA or touch the graph model, and never retain full cohorts.
-            if not stage2_training_complete:
-                for _data, _mpath in train_items + val_items:
-                    if (time.time() - PART2_START_TIME) / 3600 >= TRAIN_BUDGET_HOURS:
-                        save_stage2(_start_epoch - 1, False, push=True)
-                        mo.stop(True, mo.md("Node cache partly built. Resume Part 2; completed files are retained."))
-                    stage2_node_probs(_data, _mpath)
-            _first_data, _first_path = train_items[0]
-            _probe_meta = load_meta(_first_path)
-            _probe_x, _probe_y = make_training_patch(_probe_meta, VOXEL_MAX_SIZE,
-                stage2_node_probs(_first_data, _first_path), rng=np.random.RandomState(SEED))
-            _gpu_runtime = configure_gpu(voxel_head, _probe_x, _probe_y,
-                _stage2_loss if not stage2_training_complete else None,
-                roi=VOXEL_MAX_SIZE, precision=GPU_PRECISION, max_microbatch=VOXEL_MAX_MICROBATCH,
-                max_inference_batch=INFERENCE_MAX_BATCH, memory_fraction=GPU_MEMORY_FRACTION,
-                autotune=GPU_AUTOTUNE, resume_precision=(_gpu_runtime["precision"]
-                    if _resume_path and _gpu_runtime.get("precision_validated", False) else None))
-            _gpu_runtime["precision_validated"] = True
-            voxel_scaler = torch.amp.GradScaler("cuda", enabled=USE_AMP and _gpu_runtime["precision"] == "fp16")
-            if _resume_path:
-                voxel_scaler.load_state_dict(_latest["scaler_state_dict"])
-            write_json_atomic(os.path.join(PERSISTENT_BASE, "gpu_runtime.json"), _gpu_runtime)
-            if not _resume_path:
-                save_stage2(0, False, push=True)
-            del _probe_meta, _probe_x, _probe_y
-    
-            def _prepare_stage2_case(value):
-                (_data, _mpath), _seed = value
-                _meta = load_meta(_mpath)
-                _x, _y = make_training_patch(_meta, VOXEL_MAX_SIZE, stage2_node_probs(_data, _mpath, cached_only=True),
-                                             rng=np.random.RandomState(int(_seed)))
-                _tx = torch.from_numpy(_x).float()
-                _ty = torch.from_numpy(_y).long()
-                if USE_AMP:
-                    _tx, _ty = _tx.pin_memory(), _ty.pin_memory()
-                return _tx, _ty
-    
-            _last_epoch = _start_epoch - 1
-            _last_epoch_hours = 0.
-            _paused = False
-            for _epoch in range(_start_epoch, VOXEL_EPOCHS + 1):
-                if stage2_training_complete:
-                    break
-                if (time.time() - PART2_START_TIME) / 3600 + 1.1 * _last_epoch_hours >= TRAIN_BUDGET_HOURS:
-                    _paused = True
-                    break
-                _t0 = time.time()
-                voxel_head.train()
-                _train_losses, _train_dices = [], []
-                _epoch_items = sorted(train_items, key=lambda item: os.path.basename(item[1]))
-                random.shuffle(_epoch_items)
-                _seeds = np.random.randint(0, 2**31 - 1, size=len(_epoch_items))
-                _prepared = bounded_prefetch(zip(_epoch_items, _seeds), _prepare_stage2_case,
-                                             workers=VOXEL_PREFETCH_WORKERS if USE_AMP else 0,
-                                             depth=max(2, VOXEL_EFFECTIVE_BATCH_SIZE))
-                try:
-                    for _group in patient_groups(_prepared, VOXEL_EFFECTIVE_BATCH_SIZE):
-                        if (time.time() - PART2_START_TIME) / 3600 >= TRAIN_BUDGET_HOURS:
-                            _paused = True
-                            break
-                        _group_loss, _group_dices = train_patient_group(voxel_head, _group, voxel_optimizer,
-                            voxel_scaler, _stage2_loss, _gpu_runtime)
-                        _train_losses.extend([_group_loss] * len(_group))
-                        _train_dices.extend(_group_dices)
-                finally:
-                    _prepared.close()
-                if _paused:
-                    break
-                voxel_head.eval()
-                _val_dices, _val_losses = [], []
-                for _data, _mpath in val_items:
-                    if (time.time() - PART2_START_TIME) / 3600 >= TRAIN_BUDGET_HOURS:
-                        _paused = True
-                        break
-                    _meta = load_meta(_mpath)
-                    # Selection uses ALL voxels. The plotted loss uses a fixed UNIFORM
-                    # validation patch and is labelled as a patch loss in the run notes.
-                    _val_dices.append(mean_region_dice(stage2_predict(_data, _mpath, _meta), _meta["seg"]))
-                    _rng_seed = int(hashlib.sha256(os.path.basename(_mpath).encode()).hexdigest()[:8], 16)
-                    _x_np, _y_np = make_training_patch(_meta, VOXEL_MAX_SIZE, stage2_node_probs(_data, _mpath),
-                                                       rng=np.random.RandomState(_rng_seed), tumour_probability=0.)
-                    with torch.no_grad(), amp_context(_gpu_runtime, device):
-                        _logits, _boundary = voxel_head(torch.from_numpy(_x_np).unsqueeze(0).float().to(device))
-                        _vloss = voxel_loss(_logits, torch.from_numpy(_y_np).unsqueeze(0).long().to(device),
-                                            _class_weights_dev, dice_weight=VOXEL_DICE_WEIGHT, ce_weight=VOXEL_CE_WEIGHT,
-                                            focal_weight=VOXEL_FOCAL_WEIGHT, focal_gamma=VOXEL_FOCAL_GAMMA,
-                                            boundary_logits=_boundary, boundary_weight=VOXEL_BOUNDARY_WEIGHT)
-                    _val_losses.append(float(_vloss))
-                if _paused:
-                    break
-                voxel_scheduler.step()
-                _vd = float(np.mean(_val_dices))
-                _seconds = time.time() - _t0
-                vox_history.append(dict(epoch=_epoch, train_loss=float(np.mean(_train_losses)),
-                                        val_loss=float(np.mean(_val_losses)), train_patch_dice=float(np.mean(_train_dices)),
-                                        val_dice=_vd, epoch_seconds=_seconds))
-                if _vd > best_vox_dice:
-                    best_vox_dice, best_vox_epoch = _vd, _epoch
-                    best_vox_state = {k: v.detach().cpu().clone() for k, v in voxel_head.state_dict().items()}
-                    vox_epochs_since_improve = 0
-                else:
-                    vox_epochs_since_improve += 1
-                _last_epoch, _last_epoch_hours = _epoch, _seconds / 3600
-                stage2_training_complete = _epoch == VOXEL_EPOCHS or vox_epochs_since_improve >= EARLY_STOP_PATIENCE
-                save_stage2(_epoch, stage2_training_complete,
-                            push=stage2_training_complete or _epoch % CKPT_PUSH_EVERY_EPOCHS == 0)
-                write_json_atomic(os.path.join(PERSISTENT_BASE, "gpu_runtime.json"), _gpu_runtime)
-                print(f"Epoch {_epoch}: training patch loss={np.mean(_train_losses):.4f}; full-volume val Dice={_vd:.4f}")
-                if stage2_training_complete:
-                    break
-            if _paused:
-                # Retain the last COMPLETED epoch; partial epochs are replayed on resume.
-                if HF_ENABLED:
-                    hf_upload_file_verified(STAGE2_LATEST_PATH, STAGE2_LATEST_NAME, HF_MODEL_REPO_ID,
-                                            HF_MODEL_REPO_TYPE, f"review stage2 paused after epoch {_last_epoch}")
-            mo.stop(not stage2_training_complete, mo.md("Session budget reached. Resume Part 2; the last completed epoch is saved."))
-            if best_vox_state is not None:
-                voxel_head.load_state_dict(best_vox_state)
-            print("Part 2 training complete. Held-out evaluation is in Part 5.")
-    finally:
-        sync_main(MAIN_STORE,PERSISTENT_BASE,STAGE2_LATEST_NAME,STAGE1_MODEL_SHA256)
-    return best_vox_epoch, stage2_training_complete, vox_history
-
-
-@app.cell
-def _(
-    HF_ENABLED,
-    HF_MODEL_REPO_ID,
-    HF_MODEL_REPO_TYPE,
-    MAIN_STORE,
-    PERSISTENT_BASE,
-    best_vox_epoch,
-    hf_upload_file_verified,
-    mo,
-    np,
-    os,
-    plt,
+    project_node_probs,
+    rec_lambda,
+    reconstruction_loss,
+    region_dice_loss,
+    research_store_factory,
+    soft_cross_entropy,
     stage1_checkpoint,
-    stage2_training_complete,
-    vox_history,
+    structural_teacher_prob,
+    test_items,
+    train_items,
+    val_items,
+    valid_cases,
+    voxel_loss,
 ):
-    mo.stop(not stage2_training_complete, mo.md("Resume Stage 2 before diagnostics or final export."))
-    import csv as _csv
+    MAIN_STAGE2_STATE = None
+    RUN_ABLATIONS = True
+    RESEARCH_SEEDS = (SEED,)
+    RUN_EXTENDED_HOP_CONTROLS = False  # Optional mechanism detail; never change after starting Part 3.
+    from brats_experiments import experiment_plan as _plan_for_selection
+    from brats_practical import MAIN_ROWS as _main_rows
+    RESEARCH_PLAN_NAMES = _main_rows
+    RESEARCH_ACTIVE_SEEDS = ()  # Schedule a subset if desired; empty runs all remaining seeds.
+    RESEARCH_MAX_CASES_PER_SPLIT = 0  # Full saved cohort. The old 300-case debug cap cannot produce final results.
+    RESEARCH_BUDGET_HOURS = TRAIN_BUDGET_HOURS
+    from brats_experiments import experiment_plan as _plan
+    _all_names = list(RESEARCH_PLAN_NAMES)
+    RESEARCH_MODE = "train"
+    RESEARCH_JOBS = ('full','no_voxel','cnn_only')
+    RESEARCH_PIPELINE_SHA256 = "b5ba00ce35682e2bc574e22ceec967be0d99c5bed21bb1993b4ef11c9a6c20d2"
+    from brats_experiments import run_research, experiment_plan, ResearchRunner, BudgetPause
+    RESEARCH_AVAILABLE_ROWS = experiment_plan(N_SEGMENTS, HOPS, K_MAX, USE_MASKED_RECONSTRUCTION)
+    print("Available research jobs:", [row["name"] for row in RESEARCH_AVAILABLE_ROWS])
+    RESEARCH_CONTEXT = dict(MAIN_STORE=MAIN_STORE,
+        RESEARCH_STORE_FACTORY=research_store_factory,STAGE1_MODEL_SHA256=STAGE1_MODEL_SHA256,
+        RAW_SOURCE_AVAILABLE=RAW_SOURCE_AVAILABLE,
+        stage1_checkpoint=stage1_checkpoint,MAIN_STAGE2_STATE=MAIN_STAGE2_STATE,
+        HeteroMaskedReconstructor=HeteroMaskedReconstructor,APPEARANCE_DIM=APPEARANCE_DIM,
+        REC_DECODER_HIDDEN=REC_DECODER_HIDDEN,rec_lambda=rec_lambda,mask_hetero_graph=mask_hetero_graph,
+        reconstruction_loss=reconstruction_loss,REC_SEPARATE_CLEAN_PASS=REC_SEPARATE_CLEAN_PASS,
+        LAMBDA_REC=LAMBDA_REC,REC_WARMUP_EPOCHS=REC_WARMUP_EPOCHS,REC_MASK_RATE=REC_MASK_RATE,
+        REC_EDGE_MASK_RATE=REC_EDGE_MASK_RATE,REC_FLAGS=REC_FLAGS,REC_NEG_PER_POS=REC_NEG_PER_POS,
+        REC_FEAT_LOSS=REC_FEAT_LOSS,REC_SCE_GAMMA=REC_SCE_GAMMA,
+            train_items=train_items,
+        val_items=val_items,
+        test_items=test_items,
+        SEED=SEED,
+        N_SEGMENTS=N_SEGMENTS,
+        HOPS=HOPS,
+        DATASET_FINGERPRINT=DATASET_FINGERPRINT,
+        RUN_CONFIG=RUN_CONFIG,
+        class_weights=class_weights,
+        EPOCHS=EPOCHS,
+        VOXEL_EPOCHS=VOXEL_EPOCHS,
+        EARLY_STOP_PATIENCE=EARLY_STOP_PATIENCE,
+        USE_MASKED_RECONSTRUCTION=USE_MASKED_RECONSTRUCTION,
+        USE_STRUCTURAL_REFINEMENT=USE_STRUCTURAL_REFINEMENT,
+        USE_ADAPTIVE_HOPS=USE_ADAPTIVE_HOPS,
+        HF_ENABLED=HF_ENABLED,
+        HF_MODEL_REPO_ID=HF_MODEL_REPO_ID,
+        HF_MODEL_REPO_TYPE=HF_MODEL_REPO_TYPE,
+        hf_upload_file_verified=hf_upload_file_verified,
+        hf_upload_receipt=hf_upload_receipt,
+        hf_try_download=hf_try_download,
+        PERSISTENT_BASE=PERSISTENT_BASE,
+        NODE_TYPES=NODE_TYPES,
+        valid_cases=valid_cases,
+        get_case_id=get_case_id,
+        build_and_save=build_and_save,
+        COMPACTNESS=COMPACTNESS,
+        SLIC_ITERS=SLIC_ITERS,
+        NODE_FEAT_DIM=NODE_FEAT_DIM,
+        HIDDEN_DIM=HIDDEN_DIM,
+        NUM_CLASSES=NUM_CLASSES,
+        HEADS=HEADS,
+        HGT_LAYERS=HGT_LAYERS,
+        DROPOUT=DROPOUT,
+        K_MAX=K_MAX,
+        HOP_TEMPERATURE=HOP_TEMPERATURE,
+        QoSHRGN=QoSHRGN,
+        STRUCTURAL_FLAGS=STRUCTURAL_FLAGS,
+        StructuralQoSHRGN=StructuralQoSHRGN,
+        STRUCTURAL_HIDDEN=STRUCTURAL_HIDDEN,
+        STRUCTURAL_DROPOUT=STRUCTURAL_DROPOUT,
+        device=device,
+        soft_cross_entropy=soft_cross_entropy,
+        DICE_WEIGHT=DICE_WEIGHT,
+        region_dice_loss=region_dice_loss,
+        ET_FOCAL_WEIGHT=ET_FOCAL_WEIGHT,
+        focal_loss_soft=focal_loss_soft,
+        FOCAL_GAMMA=FOCAL_GAMMA,
+        DataLoader=DataLoader,
+        BATCH_SIZE=BATCH_SIZE,
+        structural_teacher_prob=structural_teacher_prob,
+        STRUCTURAL_AUX_WEIGHT=STRUCTURAL_AUX_WEIGHT,
+        HOP_REG_WEIGHT=HOP_REG_WEIGHT,
+        load_meta=load_meta,
+        postprocess_prediction_auto=postprocess_prediction_auto,
+        project_node_probs=project_node_probs,
+        LR=LR,
+        WEIGHT_DECAY=WEIGHT_DECAY,
+        CKPT_PUSH_EVERY_EPOCHS=CKPT_PUSH_EVERY_EPOCHS,
+        VoxelRefinementHead=VoxelRefinementHead,
+        MODALITIES=MODALITIES,
+        VOXEL_BASE_CHANNELS=VOXEL_BASE_CHANNELS,
+        VOXEL_MAX_SIZE=VOXEL_MAX_SIZE,
+        voxel_loss=voxel_loss,
+        VOXEL_DICE_WEIGHT=VOXEL_DICE_WEIGHT,
+        VOXEL_CE_WEIGHT=VOXEL_CE_WEIGHT,
+        VOXEL_FOCAL_WEIGHT=VOXEL_FOCAL_WEIGHT,
+        VOXEL_FOCAL_GAMMA=VOXEL_FOCAL_GAMMA,
+        VOXEL_BOUNDARY_WEIGHT=VOXEL_BOUNDARY_WEIGHT,
+        GPU_PRECISION=GPU_PRECISION,
+        VOXEL_MAX_MICROBATCH=VOXEL_MAX_MICROBATCH,
+        INFERENCE_MAX_BATCH=INFERENCE_MAX_BATCH,
+        GPU_MEMORY_FRACTION=GPU_MEMORY_FRACTION,
+        GPU_AUTOTUNE=GPU_AUTOTUNE,
+        VOXEL_PREFETCH_WORKERS=VOXEL_PREFETCH_WORKERS,
+        VOXEL_EFFECTIVE_BATCH_SIZE=VOXEL_EFFECTIVE_BATCH_SIZE,
+        INFERENCE_OVERLAP=INFERENCE_OVERLAP,
+        VOXEL_LR=VOXEL_LR,
+        USE_CC_POSTPROCESS=USE_CC_POSTPROCESS,
+        ET_MIN_VOXELS=ET_MIN_VOXELS,
+        STRUCTURAL_TEACHER_PROB_START=STRUCTURAL_TEACHER_PROB_START,
+        STRUCTURAL_TEACHER_PROB_END=STRUCTURAL_TEACHER_PROB_END,
+        RESEARCH_PIPELINE_SHA256=RESEARCH_PIPELINE_SHA256,
+    )
 
-
-    def export_training_curves(hist, stem, loss_keys, dice_keys, best_epoch):
-        _fig_dir = os.path.join(PERSISTENT_BASE, "figures")
-        os.makedirs(_fig_dir, exist_ok=True)
-        _csv_path = os.path.join(_fig_dir, f"{stem}.csv")
-        _png_path = os.path.join(_fig_dir, f"{stem}.png")
-        _scalar_keys = []
-        for _row in hist:
-            for _key, _value in _row.items():
-                if isinstance(_value, (int, float, np.integer, np.floating)) and _key not in _scalar_keys:
-                    _scalar_keys.append(_key)
-        with open(_csv_path, "w", newline="") as _fh:
-            _writer = _csv.DictWriter(_fh, fieldnames=_scalar_keys)
-            _writer.writeheader()
-            for _row in hist:
-                _writer.writerow({k: _row.get(k, "") for k in _scalar_keys})
-        _fig, _axes = plt.subplots(1, 2, figsize=(12, 4))
-        _epochs = [row.get("epoch", i + 1) for i, row in enumerate(hist)]
-        for _key in loss_keys:
-            if _key in _scalar_keys:
-                _axes[0].plot(_epochs, [row.get(_key, np.nan) for row in hist], label=_key)
-        for _key in dice_keys:
-            if _key in _scalar_keys:
-                _axes[1].plot(_epochs, [row.get(_key, np.nan) for row in hist], label=_key)
-        _axes[0].set_title("Loss"); _axes[0].set_xlabel("epoch"); _axes[0].legend()
-        _axes[1].set_title("Dice"); _axes[1].set_xlabel("epoch"); _axes[1].legend()
+    RESEARCH_SETTINGS = dict(mode=RESEARCH_MODE,seeds=RESEARCH_SEEDS,plan_names=RESEARCH_PLAN_NAMES,
+        jobs=RESEARCH_JOBS,active_seeds=RESEARCH_ACTIVE_SEEDS,max_cases_per_split=RESEARCH_MAX_CASES_PER_SPLIT,
+        budget_hours=RESEARCH_BUDGET_HOURS,session_start=PART2_START_TIME)
+    _runner = ResearchRunner(RESEARCH_CONTEXT,RESEARCH_SETTINGS)
+    try:
+        research_status=_runner.run()
+        mo.stop(not research_status.get('scheduled_training_complete'),
+            mo.md('Part 2 could not finish the declared hybrid/CNN-only workload within this session. Saved results are incomplete.'))
+        _voxel_state=_runner.store.read(f'runs/full/seed_{SEED}/voxel.pt')
+        MAIN_STAGE2_STATE=dict(training_complete=True,stage1_sha256=STAGE1_MODEL_SHA256,
+            split=SPLIT_CASE_IDS,split_fingerprint=SPLIT_FINGERPRINT,dataset_fingerprint=DATASET_FINGERPRINT,
+            stage2_config=RUN_CONFIG['voxel'],epoch=_voxel_state['epoch'],
+            best_vox_epoch=_voxel_state['best_epoch'],best_vox_dice=_voxel_state['best_score'],
+            best_vox_state=_voxel_state['best'],vox_history=_voxel_state['history'],
+            gpu_runtime=_voxel_state['runtime'],stopping_reason=_voxel_state['stopping_reason'],
+            phase_seconds_used=_voxel_state['phase_seconds_used'],phase_seconds_limit=_voxel_state['phase_seconds_limit'],
+            convergence_demonstrated=False)
+        MAIN_STORE.save(STAGE2_LATEST_NAME,MAIN_STAGE2_STATE)
+        # The final report includes these histories. Generate the main curves now as well.
+        import matplotlib.pyplot as _plot
+        _history=MAIN_STAGE2_STATE['vox_history']
+        _figure,_axes=_plot.subplots(1,2,figsize=(11,4))
+        for _key in ('train_loss','val_loss'):
+            _axes[0].plot([r['epoch'] for r in _history],[r.get(_key,float('nan')) for r in _history],label=_key)
+        for _key in ('train_patch_dice','val_dice'):
+            _axes[1].plot([r['epoch'] for r in _history],[r.get(_key,float('nan')) for r in _history],label=_key)
         for _axis in _axes:
-            _axis.axvline(best_epoch, color="black", linestyle="--", alpha=0.7)
-            _axis.grid(alpha=0.2)
-        _fig.tight_layout()
-        _fig.savefig(_png_path, dpi=150)
-        plt.close(_fig)
-        return _csv_path, _png_path
-
-
-    STAGE2_CURVE_FILES = export_training_curves(
-        vox_history, "stage2_curves", ("train_loss", "val_loss"),
-        ("train_patch_dice", "val_dice"), best_vox_epoch)
-    STAGE1_CURVE_FILES = export_training_curves(
-        stage1_checkpoint.get("history") or [], "stage1_curves",
-        ("train_total", "val_total"), ("train_node_proxy", "val_dice"),
-        stage1_checkpoint.get("best_epoch", 0))
-    if HF_ENABLED and stage1_checkpoint.get("training_complete"):
-        for _path in STAGE1_CURVE_FILES:
-            hf_upload_file_verified(_path, os.path.basename(_path), HF_MODEL_REPO_ID,
-                                    HF_MODEL_REPO_TYPE, "stage1 training curves")
-    if HF_ENABLED and stage2_training_complete:
-        for _path in STAGE2_CURVE_FILES:
-            hf_upload_file_verified(_path, os.path.basename(_path), HF_MODEL_REPO_ID,
-                                    HF_MODEL_REPO_TYPE, "stage2 training curves")
-
-    MAIN_STORE.flush()
-    print("PART 2 COMPLETE: open Part 3 in a fresh Molab session.")
+            _axis.axvline(MAIN_STAGE2_STATE['best_vox_epoch'],linestyle='--',color='black');_axis.legend();_axis.set_xlabel('Epoch')
+        _axes[0].set_title('Training / uniform validation patch loss')
+        _axes[1].set_title('Training patch / full-volume validation Dice')
+        _figure.tight_layout();_figure.savefig(MAIN_STORE.path('figures/stage2_curves.png'),dpi=160);_plot.close(_figure)
+        MAIN_STORE.push('figures/stage2_curves.png')
+        print('PART 2 COMPLETE: hybrid and CNN-only controls finished their declared compute protocol. Continue to Part 3.')
+    finally:
+        if hasattr(_runner.store,'flush'):
+            _runner.store.flush()
+        MAIN_STORE.flush()
     return
 
 

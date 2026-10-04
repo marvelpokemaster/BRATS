@@ -20,7 +20,7 @@ from brats_transfer import sha256_path, write_json_atomic, extract_verified_zip
 from brats_protocol import make_training_patch, sliding_window_predict, mean_region_dice, segmentation_metrics, summarize_metric_rows
 from brats_gpu import configure_gpu, bounded_prefetch, patient_groups, train_patient_group
 
-RESEARCH_VERSION = "research-v6-zip-ssl"
+RESEARCH_VERSION = "research-v8-practical"
 
 
 class BudgetPause(RuntimeError):
@@ -33,7 +33,7 @@ class Deadline:
 
     def check(self):
         if time.time() >= self.end:
-            raise BudgetPause("Research session budget reached; restart this notebook to continue")
+            raise BudgetPause("Session work budget reached; export an incomplete-study status rather than silently extending the five-session plan")
 
 
 def identity(value):
@@ -89,34 +89,21 @@ def frozen_subset(groups, maximum=0, seed=42):
     return selected
 
 
-def experiment_plan(n_segments, hops, k_max=4, masked_reconstruction=True):
-    """All rows specify the complete pipeline; each patch states the change."""
-    full = dict(backbone="hgt", structural=True, descriptors=True, hop_mode="adaptive",
-                fixed_hops=hops, cross_edges=True, soft_labels=True, voxel=True,
-                boundary=True, focal=True, hop_penalty=True, n_segments=n_segments, masked_reconstruction=masked_reconstruction, voxel_kind="refinement")
-    changes = [
-        ("full", {}, "Complete proposed pipeline"),
-        ("no_structural", {"structural":False}, "Remove structural module and its auxiliary loss"),
-        ("no_descriptors", {"descriptors":False}, "Retain refinement/auxiliary loss; remove structural descriptor input"),
-        ("fixed_shared_hops", {"hop_mode":"fixed"}, "Fixed depth with the SAME shared propagation operator"),
-        ("fixed_shared_max", {"hop_mode":"fixed", "fixed_hops":k_max}, "Fixed maximum depth using shared propagation weights"),
-        ("uniform_shared_hops", {"hop_mode":"uniform"}, "Uniform mixture of shared-depth states without learned selection/penalty"),
-        ("no_hop_penalty", {"hop_penalty":False}, "Retain learned hop selection without the expected-depth penalty"),
-        ("hgt_only", {"hop_mode":"fixed", "fixed_hops":0}, "Remove extra propagation after HGT; retain later refinement"),
-        ("no_cross_edges", {"cross_edges":False}, "Remove both correspondence edge directions"),
-        ("hard_labels", {"soft_labels":False}, "Replace graph fractional targets by majority one-hot labels"),
-        ("no_boundary", {"boundary":False}, "Set voxel boundary auxiliary loss weight to zero"),
-        ("no_voxel", {"voxel":False}, "Use the SAME full graph checkpoint without voxel refinement"),
-        ("cnn_only", {"backbone":"none", "structural":False, "masked_reconstruction":False}, "Four-MRI-channel CNN with the same head/voxel training policy"),
-        ("graphsage_backbone", {"backbone":"sage"}, "Homogeneous max-pool GraphSAGE backbone control; not a paper reproduction"),
-        ("dice_ce", {"focal":False, "boundary":False}, "Loss-family control: Dice + weighted CE (graph and voxel)"),
-    ]
+def experiment_plan(n_segments, hops, k_max=2, masked_reconstruction=False):
     if masked_reconstruction:
-        changes.append(("no_masked_reconstruction", {"masked_reconstruction":False}, "Remove masked feature/link reconstruction and decoder; retain supervised graph objective"))
-    changes.append(("unet_3d", {"backbone":"none", "structural":False, "masked_reconstruction":False, "voxel_kind":"unet", "boundary":False}, "Independent 3D U-Net, same split/patches/full-volume selection; no boundary head"))
-    changes += [(f"slic_{n}", {"n_segments":n}, "Complete pipeline at changed SLIC resolution")
-                for n in (5000, 10000, 15000, 20000) if n != n_segments]
-    return [dict(name=name, description=description, **dict(full, **delta)) for name, delta, description in changes]
+        raise ValueError('Practical v8 fixes reconstruction off; use a new declared study for extensions.')
+    full=dict(backbone='hgt',structural=False,descriptors=False,hop_mode='adaptive',fixed_hops=hops,
+              cross_edges=True,soft_labels=True,voxel=True,boundary=False,focal=False,hop_penalty=True,
+              n_segments=n_segments,masked_reconstruction=False,voxel_kind='refinement')
+    changes=[('full',{},'Practical HGT + learned 0..2 hop mixture + voxel refinement'),
+        ('no_voxel',{'voxel':False},'Same selected HGT graph; no extra training'),
+        ('cnn_only',{'backbone':'none'},'Same refinement CNN using four MRI channels only'),
+        ('graphsage_backbone',{'backbone':'sage','voxel':False},'Ordinary GraphSAGE graph-only control; compare against no_voxel'),
+        ('fixed_shared_hops',{'hop_mode':'fixed','voxel':False},'Fixed shared two-hop graph-only control; compare against no_voxel'),
+        ('segresnet',{'backbone':'none','voxel_kind':'segresnet'},'Independent MONAI SegResNet voxel baseline')]
+    changes += [(f'slic_{n}',{'n_segments':n,'voxel':False},'Validation-only SLIC pilot')
+                for n in (5000,10000,15000,20000) if n!=n_segments]
+    return [dict(name=name,description=description,**dict(full,**delta)) for name,delta,description in changes]
 
 
 class ArtifactStore:
@@ -176,86 +163,7 @@ class ArtifactStore:
                 else json.loads(path.read_text(encoding="utf-8")))
 
 
-def train_phase(model, store, name, signature, *, epochs, patience, lr, decay,
-                initial_precision, calibrate, train_epoch, validate, deadline, push_every=5):
-    """Save completed epochs; replay interrupted epochs with saved RNG/optimizer.
-
-    calibrate(saved_precision) may prepare frozen priors and raise BudgetPause.
-    The epoch-zero checkpoint deliberately permits initial precision selection.
-    """
-    dev = next(model.parameters()).device
-    optimizer = torch.optim.AdamW((p for p in model.parameters() if p.requires_grad), lr=lr, weight_decay=decay)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=lr*.02)
-    state = store.read(name)
-    if state is not None and state["signature"] != signature:
-        raise RuntimeError("Research resume identity mismatch: " + name)
-    if state is not None:
-        model.load_state_dict(state["model"])
-        optimizer.load_state_dict(state["optimizer"]); scheduler.load_state_dict(state["scheduler"])
-        restore_rng(state["rng"])
-    runtime = dict(precision=initial_precision, microbatch=1, inference_batch=1)
-    epoch = state["epoch"] if state else 0
-    best = state["best"] if state else None
-    best_score = state["best_score"] if state else -1.
-    best_epoch = state["best_epoch"] if state else 0
-    stale = state["stale"] if state else 0
-    history = state["history"] if state else []
-    complete = bool(state and state["complete"])
-    validated = bool(state and state.get("precision_validated"))
-    scaler = torch.amp.GradScaler("cuda", enabled=dev.type=="cuda" and initial_precision=="fp16")
-
-    def snapshot():
-        return dict(signature=signature, epoch=epoch, model=cpu_state(model), optimizer=optimizer.state_dict(),
-            scheduler=scheduler.state_dict(), scaler=scaler.state_dict(), rng=rng_state(), best=best,
-            best_score=best_score, best_epoch=best_epoch, stale=stale, history=history, complete=complete,
-            runtime=runtime, precision_validated=validated)
-
-    if complete:
-        model.load_state_dict(best); model.eval()
-        model.brats_gpu_runtime = state["runtime"]
-        return state
-    if state is None:
-        store.save(name, snapshot(), push=True)
-    try:
-        deadline.check()
-        runtime = calibrate(state["runtime"]["precision"] if validated else None)
-        validated = True
-        scaler = torch.amp.GradScaler("cuda", enabled=dev.type=="cuda" and runtime["precision"]=="fp16")
-        if state and state.get("precision_validated"):
-            scaler.load_state_dict(state["scaler"])
-        if epoch==0:
-            store.save(name, snapshot(), push=True)
-        for next_epoch in range(epoch+1, epochs+1):
-            deadline.check()
-            started = time.perf_counter()
-            if dev.type=="cuda":
-                torch.cuda.reset_peak_memory_stats(dev)
-            model.train()
-            metrics = train_epoch(next_epoch, optimizer, scaler, runtime, deadline)
-            model.eval()
-            score = float(validate(deadline))
-            if not np.isfinite(score):
-                raise FloatingPointError("Non-finite validation score")
-            scheduler.step(); epoch = next_epoch
-            history.append(dict(epoch=epoch, val_dice=score, seconds=time.perf_counter()-started,
-                peak_cuda_bytes=torch.cuda.max_memory_allocated(dev) if dev.type=="cuda" else 0, **metrics))
-            if score > best_score:
-                best_score, best_epoch, stale, best = score, epoch, 0, cpu_state(model)
-            else:
-                stale += 1
-            complete = epoch==epochs or stale>=patience
-            store.save(name, snapshot(), push=complete or epoch % push_every==0)
-            print(f"[{name}] epoch {epoch}: validation patient Dice={score:.4f}")
-            if complete:
-                break
-    except BudgetPause:
-        # Never label partial-epoch weights as a completed checkpoint.
-        store.push(name)
-        raise
-    if best is None:
-        raise RuntimeError("No complete validation epoch")
-    model.load_state_dict(best); model.eval()
-    return store.read(name)
+from brats_practical import train_phase
 
 
 def paired_summary(records, reference="full", draws=5000, seed=1942):
@@ -319,7 +227,9 @@ def controlled_hop_mix(self, x_dict, edge_index_dict, edge_attr_dict):
     current = x_dict
     for _ in range(steps):
         logits = {nt:self.pre_head[nt](current[nt]) for nt in current}
-        current = self.adaptive_prop(current, edge_index_dict, edge_attr_dict, logits)
+        from torch.utils.checkpoint import checkpoint as _checkpoint
+        current = (_checkpoint(self.adaptive_prop,current,edge_index_dict,edge_attr_dict,logits,use_reentrant=False)
+                   if self.training and torch.is_grad_enabled() else self.adaptive_prop(current,edge_index_dict,edge_attr_dict,logits))
         states.append(current)
     self.hop_regularization = torch.zeros((),device=next(iter(current.values())).device)
     if self.control_mode=="fixed":
@@ -368,7 +278,7 @@ class HomogeneousSAGE(torch.nn.Module):
         return {nt:self.head(h) for nt,h in embeddings.items()}, embeddings
 
 
-def save_imported_selection(store,name,signature,model,epoch,best_epoch,score,history,runtime,lr,decay,epochs,origin):
+def save_imported_selection(store,name,signature,model,epoch,best_epoch,score,history,runtime,lr,decay,epochs,origin,termination=None):
     # Complete selections are inference-only; these placeholder optimizer states
     # are never used to continue training imported models.
     optimizer=torch.optim.AdamW((p for p in model.parameters() if p.requires_grad),lr=lr,weight_decay=decay)
@@ -377,7 +287,7 @@ def save_imported_selection(store,name,signature,model,epoch,best_epoch,score,hi
     weights=cpu_state(model)
     store.save(name,dict(signature=signature,epoch=epoch,model=weights,best=weights,optimizer=optimizer.state_dict(),
         scheduler=scheduler.state_dict(),scaler=scaler.state_dict(),rng=rng_state(),best_epoch=best_epoch,
-        best_score=score,stale=0,history=history,complete=True,runtime=runtime,precision_validated=True,origin=origin),push=True)
+        best_score=score,stale=0,history=history,complete=True,runtime=runtime,precision_validated=True,origin=origin,**(termination or {})),push=True)
 
 
 class IndependentUNet(torch.nn.Module):
@@ -426,6 +336,7 @@ class ResearchRunner:
         self.c, self.settings = context, settings
         c = self.c
         self.deadline = Deadline(settings["budget_hours"],settings.get("session_start"))
+        self.deadline.phase_seconds = 2700 if settings.get("pilot") else 8100
         self.groups = frozen_subset(dict(train=c["train_items"],val=c["val_items"],test=c["test_items"]),
                                     settings["max_cases_per_split"],c["SEED"])
         all_rows = experiment_plan(c["N_SEGMENTS"],c["HOPS"],c["K_MAX"],c["USE_MASKED_RECONSTRUCTION"])
@@ -435,15 +346,20 @@ class ResearchRunner:
         if "full" not in requested:
             raise ValueError("Include full in the frozen comparison plan")
         self.plan = [row for row in all_rows if row["name"] in requested]
+        if settings.get('pilot'):
+            self.groups = {split: sorted(random.Random(c['SEED']+i).sample(items,min(cap,len(items))),key=case_id)
+                for i,(split,items,cap) in enumerate((('train',self.groups['train'],64),('val',self.groups['val'],16)))}
+            self.groups['test']=[]
+            self.plan=[dict(row,voxel=False) for row in self.plan]
         self.seeds = tuple(int(seed) for seed in settings["seeds"])
         if not self.seeds or len(set(self.seeds))!=len(self.seeds):
             raise ValueError("Supply distinct research seeds")
         if c["USE_MASKED_RECONSTRUCTION"] and not c["REC_SEPARATE_CLEAN_PASS"]:
             raise ValueError("Continuation research requires Part 1's declared separate clean reconstruction pass")
-        if not c["USE_STRUCTURAL_REFINEMENT"] or not c["USE_ADAPTIVE_HOPS"]:
-            raise ValueError("The full research row requires the declared structural + adaptive main configuration")
-        source_files = [Path(__file__),Path(__file__).with_name("brats_gpu.py"),Path(__file__).with_name("brats_protocol.py")]
-        self.manifest = dict(version=RESEARCH_VERSION, rows=self.plan,seeds=list(self.seeds),
+        if c["USE_STRUCTURAL_REFINEMENT"] or not c["USE_ADAPTIVE_HOPS"]:
+            raise ValueError("Practical v8 requires structural refinement off and adaptive hops on")
+        source_files = [Path(__file__).with_name("brats_practical.py"),Path(__file__),Path(__file__).with_name("brats_gpu.py"),Path(__file__).with_name("brats_protocol.py"),Path(__file__).with_name("brats_graph.py")]
+        self.manifest = dict(version=RESEARCH_VERSION, compute_protocol=dict(phase_seconds=2700 if settings.get('pilot') else 8100, single_seed=True, pilot=bool(settings.get('pilot'))), rows=self.plan,seeds=list(self.seeds),
             split={name:list(map(case_id,items)) for name,items in self.groups.items()},
             dataset=c["DATASET_FINGERPRINT"],run_config=c["RUN_CONFIG"],
             pipeline_definitions_sha256=c.get("RESEARCH_PIPELINE_SHA256","synthetic-test-fixture"),
@@ -456,14 +372,14 @@ class ResearchRunner:
             debug=bool(settings["max_cases_per_split"]),selection="validation full-volume postprocessed mean WT/TC/ET Dice",
             metric_policy="custom finite empty-region HD95; see RESEARCH_PROTOCOL.md")
         self.key = identity(self.manifest)[:20]
-        remote = "research_v6/"+self.key
+        remote = "research_v8/"+self.key
         upload = receipt = download = None
         if c["HF_ENABLED"]:
             upload = lambda local,name:c["hf_upload_file_verified"](local,name,c["HF_MODEL_REPO_ID"],c["HF_MODEL_REPO_TYPE"],"research checkpoint/artifact")
             receipt = lambda name:c["hf_upload_receipt"](c["HF_MODEL_REPO_ID"],name)
             download = lambda name,revision:c["hf_try_download"](name,c["HF_MODEL_REPO_ID"],c["HF_MODEL_REPO_TYPE"],revision=revision)
         self.store = (c["RESEARCH_STORE_FACTORY"](self.key) if c.get("RESEARCH_STORE_FACTORY") else
-                      ArtifactStore(Path(c["PERSISTENT_BASE"])/"research_v6"/self.key,remote,upload,receipt,download))
+                      ArtifactStore(Path(c["PERSISTENT_BASE"])/"research_v8"/self.key,remote,upload,receipt,download))
         self.store.save("protocol.json",self.manifest,push=True)
 
     def transformed(self,groups,spec):
@@ -488,7 +404,7 @@ class ResearchRunner:
 
     def graphs(self,spec):
         c = self.c
-        if spec["n_segments"]==c["N_SEGMENTS"]:
+        if spec["n_segments"]==c["N_SEGMENTS"] and not self.settings.get("pilot"):
             return self.transformed(self.groups,spec)
         folder = self.store.path(f"graphs/slic_{spec['n_segments']}/marker").parent
         archive_name = f"graphs/slic_{spec['n_segments']}.zip"
@@ -568,16 +484,12 @@ class ResearchRunner:
         return {nt:values.float().softmax(-1).cpu().numpy() for nt,values in logits.items()}
 
     def graph_loss(self,logits,data,spec):
-        c=self.c;losses=[]
-        for nt in c["NODE_TYPES"]:
-            target=data[nt]
-            batch=target.batch if getattr(target,"batch",None) is not None else torch.zeros(len(target.x),device=target.x.device,dtype=torch.long)
-            loss=c["soft_cross_entropy"](logits[nt],target.y_frac,c["class_weights"].to(c["device"]))
-            loss=loss+c["DICE_WEIGHT"]*c["region_dice_loss"](logits[nt].float().softmax(-1),target.y_frac,target.vol,batch,data.num_graphs)
-            if spec["focal"]:
-                loss=loss+c["ET_FOCAL_WEIGHT"]*c["focal_loss_soft"](logits[nt],target.y_frac,gamma=c["FOCAL_GAMMA"])
-            losses.append(loss)
-        return torch.stack(losses).mean()
+        from brats_graph import patient_hierarchy_loss
+        c=self.c
+        return torch.stack([patient_hierarchy_loss(logits[nt],data[nt],data.num_graphs,
+            c['class_weights'].to(c['device']),c['DICE_WEIGHT'],c['soft_cross_entropy'],
+            c['region_dice_loss'],c['focal_loss_soft'],c['ET_FOCAL_WEIGHT'] if spec['focal'] else 0.,
+            c['FOCAL_GAMMA']) for nt in c['NODE_TYPES']]).mean()
 
     def fit_graph(self,spec,seed,groups):
         c=self.c
@@ -601,38 +513,36 @@ class ResearchRunner:
             save_imported_selection(self.store,name,signature,training_model,original.get("epochs_run",0),
                 original["best_epoch"],original["best_val_dice"],original.get("history",[]),
                 dict(precision="fp16" if c["device"].type=="cuda" else "fp32",microbatch=1,inference_batch=1),
-                c["LR"],c["WEIGHT_DECAY"],c["EPOCHS"],"unchanged Part 1 selected graph weights")
+                c["LR"],c["WEIGHT_DECAY"],c["EPOCHS"],"unchanged Part 1 selected graph weights", termination={k:original.get('graph_runtime',{}).get(k) for k in ('stopping_reason','phase_seconds_used','phase_seconds_limit')})
+        from brats_graph import GraphBatchEngine, patient_hop_penalty
+        def objective_forward(current,batch,teacher):
+            output=current(batch,teacher_prob=teacher) if hasattr(current,'base_model') else current(batch)
+            return (output[1],output[0],output[-1]) if len(output)==3 else (output[0],None,output[-1])
+        def supervised(logits,batch,aux):
+            loss=self.graph_loss(logits,batch,spec)
+            if aux is not None:
+                loss=loss+c['STRUCTURAL_AUX_WEIGHT']*self.graph_loss(aux,batch,spec)
+            if spec['backbone']=='hgt' and spec['hop_mode']=='adaptive' and spec['hop_penalty']:
+                loss=loss+c['HOP_REG_WEIGHT']*patient_hop_penalty(getattr(model,'base_model',model),batch)
+            return loss
+        engine=GraphBatchEngine(model,rec,objective_forward,supervised,c['mask_hetero_graph'],c['reconstruction_loss'],
+                                separate_clean=c['REC_SEPARATE_CLEAN_PASS'])
+        def graph_calibrate(saved, deadline):
+            return engine.calibrate([d for d,_ in groups['train']],effective_batch=c['BATCH_SIZE'],
+                max_microbatch=c.get('GRAPH_MAX_MICROBATCH',16),memory_fraction=c.get('GRAPH_MEMORY_FRACTION',.75),
+                lam=c['LAMBDA_REC'] if rec is not None else 0.,precision=saved,deadline=deadline)
         def train_epoch(epoch,opt,scaler,runtime,deadline):
-            loader=c["DataLoader"]([d for d,_ in groups["train"]],batch_size=c["BATCH_SIZE"],shuffle=True,num_workers=0,
-                generator=torch.Generator().manual_seed(seed+epoch))
+            graphs=[d for d,_ in groups['train']]
+            random.Random(seed+epoch).shuffle(graphs)
             losses=[]
-            for batch in loader:
-                deadline.check();batch=batch.to(c["device"]);opt.zero_grad(set_to_none=True)
-                teacher=c["structural_teacher_prob"](epoch,c["EPOCHS"]) if spec["structural"] else 0.
-                with torch.autocast(device_type=c["device"].type,dtype=torch.float16,enabled=c["device"].type=="cuda"):
-                    clean=batch
-                    info=None
-                    lam=c["rec_lambda"](epoch) if rec is not None else 0.
-                    if rec is not None and lam>0 and not c["REC_SEPARATE_CLEAN_PASS"]:
-                        clean,info=c["mask_hetero_graph"](batch,rec,gen=None)
-                    logits,aux=self.forward_graph(model,clean,teacher)
-                    loss=self.graph_loss(logits,batch,spec)
-                    if aux is not None:
-                        loss=loss+c["STRUCTURAL_AUX_WEIGHT"]*self.graph_loss(aux,batch,spec)
-                    if spec["backbone"]=="hgt" and spec["hop_mode"]=="adaptive" and spec["hop_penalty"]:
-                        base=model.base_model if hasattr(model,"base_model") else model
-                        loss=loss+c["HOP_REG_WEIGHT"]*base.hop_regularization
-                    if rec is not None and lam>0:
-                        corrupt,info=c["mask_hetero_graph"](batch,rec,gen=None)
-                        output=model(corrupt,teacher_prob=0.) if hasattr(model,"base_model") else model(corrupt)
-                        reconstruction,_=c["reconstruction_loss"](rec,output[-1],info,batch,gen=None,device=c["device"])
-                        loss=loss+lam*reconstruction
-                if not torch.isfinite(loss):
-                    raise FloatingPointError("Non-finite research graph loss")
-                scaler.scale(loss).backward();scaler.unscale_(opt)
-                torch.nn.utils.clip_grad_norm_(training_model.parameters(),2.,error_if_nonfinite=not scaler.is_enabled())
-                scaler.step(opt);scaler.update();losses.append(float(loss.detach()))
-            return dict(train_loss=float(np.mean(losses)))
+            teacher=c['structural_teacher_prob'](epoch,c['EPOCHS']) if spec['structural'] else 0.
+            lam=c['rec_lambda'](epoch) if rec is not None else 0.
+            for group in patient_groups(graphs,c['BATCH_SIZE']):
+                deadline.check()
+                row=engine.train_group(group,opt,scaler,runtime,teacher=teacher,lam=lam)
+                losses.extend([row['total']]*len(group))
+            return dict(train_loss=float(np.mean(losses)),graph_microbatch=runtime['microbatch'],
+                        graph_oom_retries=runtime.get('oom_retries',0))
         def validate(deadline):
             scores=[]
             for item in groups["val"]:
@@ -642,8 +552,7 @@ class ResearchRunner:
             return np.mean(scores)
         precision="fp16" if c["device"].type=="cuda" else "fp32"
         state=train_phase(training_model,self.store,name,signature,epochs=c["EPOCHS"],patience=c["EARLY_STOP_PATIENCE"],lr=c["LR"],
-            decay=c["WEIGHT_DECAY"],initial_precision=precision,calibrate=lambda saved:dict(precision=saved or precision,
-                torch_version=torch.__version__,cuda_version=torch.version.cuda,device=torch.cuda.get_device_name(c["device"]) if c["device"].type=="cuda" else "cpu"),
+            decay=c["WEIGHT_DECAY"],initial_precision=precision,calibrate=graph_calibrate,
             train_epoch=train_epoch,validate=validate,deadline=self.deadline,push_every=c["CKPT_PUSH_EVERY_EPOCHS"])
         state["reconstruction_parameters"]=sum(p.numel() for p in rec.parameters()) if rec is not None else 0
         return model,state,name
@@ -674,7 +583,8 @@ class ResearchRunner:
             graph_model.eval();graph_model.zero_grad(set_to_none=True)
             for parameter in graph_model.parameters():
                 parameter.requires_grad_(False)
-        head=(IndependentUNet(len(c["MODALITIES"]),c["NUM_CLASSES"],8) if spec["voxel_kind"]=="unet" else
+        from brats_practical import SegResNetBaseline
+        head=(SegResNetBaseline(len(c["MODALITIES"]),c["NUM_CLASSES"]) if spec["voxel_kind"]=="segresnet" else IndependentUNet(len(c["MODALITIES"]),c["NUM_CLASSES"],8) if spec["voxel_kind"]=="unet" else
               c["VoxelRefinementHead"](len(c["MODALITIES"])+(c["NUM_CLASSES"] if graph_model is not None else 0),c["NUM_CLASSES"],c["VOXEL_BASE_CHANNELS"])).to(c["device"])
         prior=self.prior_loader(graph_model)
         name=f"runs/{spec['name']}/seed_{seed}/voxel.pt"
@@ -684,7 +594,7 @@ class ResearchRunner:
             head.load_state_dict(original["best_vox_state"],strict=True)
             save_imported_selection(self.store,name,signature,head,original["epoch"],original["best_vox_epoch"],
                 original["best_vox_dice"],original["vox_history"],original["gpu_runtime"],
-                c["VOXEL_LR"],c["WEIGHT_DECAY"],c["VOXEL_EPOCHS"],"completed Part 2 selected voxel weights")
+                c["VOXEL_LR"],c["WEIGHT_DECAY"],c["VOXEL_EPOCHS"],"completed Part 2 selected voxel weights", termination={k:original.get(k) for k in ('stopping_reason','phase_seconds_used','phase_seconds_limit')})
         def prepare(value):
             item,local_seed=value
             probs=prior(item,cached_only=True) if graph_model is not None else None
@@ -696,31 +606,39 @@ class ResearchRunner:
             return c["voxel_loss"](logits,target,c["class_weights"].to(c["device"]),dice_weight=c["VOXEL_DICE_WEIGHT"],ce_weight=c["VOXEL_CE_WEIGHT"],
                 focal_weight=c["VOXEL_FOCAL_WEIGHT"] if spec["focal"] else 0.,focal_gamma=c["VOXEL_FOCAL_GAMMA"],boundary_logits=boundary,
                 boundary_weight=c["VOXEL_BOUNDARY_WEIGHT"] if spec["boundary"] else 0.)
-        def calibrate(saved):
+        def calibrate(saved, deadline):
             for item in groups["train"]+groups["val"]:
-                self.deadline.check();prior(item)
+                deadline.check();prior(item)
             x,y=prepare((groups["train"][0],seed))
-            return configure_gpu(head,x.numpy(),y.numpy(),criterion,roi=c["VOXEL_MAX_SIZE"],precision=c["GPU_PRECISION"],resume_precision=saved,
+            head.brats_gpu_runtime=configure_gpu(head,x.numpy(),y.numpy(),criterion,roi=c["VOXEL_MAX_SIZE"],precision=c["GPU_PRECISION"],resume_precision=saved,
                 max_microbatch=c["VOXEL_MAX_MICROBATCH"],max_inference_batch=c["INFERENCE_MAX_BATCH"],memory_fraction=c["GPU_MEMORY_FRACTION"],autotune=c["GPU_AUTOTUNE"])
+            return head.brats_gpu_runtime
         def train_epoch(epoch,opt,scaler,runtime,deadline):
             items=sorted(groups["train"],key=case_id);random.shuffle(items)
-            seeds=np.random.randint(0,2**31-1,len(items));losses=[]
+            seeds=np.random.randint(0,2**31-1,len(items));losses=[];dices=[]
             prepared=bounded_prefetch(zip(items,seeds),prepare,workers=c["VOXEL_PREFETCH_WORKERS"] if c["device"].type=="cuda" else 0,
                                       depth=max(2,c["VOXEL_EFFECTIVE_BATCH_SIZE"]))
             try:
                 for group in patient_groups(prepared,c["VOXEL_EFFECTIVE_BATCH_SIZE"]):
-                    deadline.check();loss,_=train_patient_group(head,group,opt,scaler,criterion,runtime)
-                    losses.extend([loss]*len(group))
+                    deadline.check();loss,batch_dices=train_patient_group(head,group,opt,scaler,criterion,runtime)
+                    losses.extend([loss]*len(group));dices.extend(batch_dices)
             finally:
                 prepared.close()
-            return dict(train_loss=float(np.mean(losses)))
+            return dict(train_loss=float(np.mean(losses)),train_patch_dice=float(np.mean(dices)))
         def validate(deadline):
-            scores=[]
+            from brats_gpu import amp_context
+            scores=[];losses=[]
             for item in groups["val"]:
                 deadline.check();meta=c["load_meta"](item[1])
-                pred=sliding_window_predict(head,meta,prior(item),roi=c["VOXEL_MAX_SIZE"],overlap=c["INFERENCE_OVERLAP"])
+                probs=prior(item)
+                pred=sliding_window_predict(head,meta,probs,roi=c["VOXEL_MAX_SIZE"],overlap=c["INFERENCE_OVERLAP"])
                 scores.append(mean_region_dice(c["postprocess_prediction_auto"](pred),meta["seg"]))
-            return np.mean(scores)
+                seed_patch=int(hashlib.sha256(case_id(item).encode()).hexdigest()[:8],16)
+                x,y=make_training_patch(meta,c['VOXEL_MAX_SIZE'],probs,rng=np.random.RandomState(seed_patch),tumour_probability=0.)
+                with torch.no_grad(),amp_context(head.brats_gpu_runtime,c['device']):
+                    losses.append(float(criterion(head(torch.from_numpy(x).unsqueeze(0).float().to(c['device'])),
+                        torch.from_numpy(y).unsqueeze(0).long().to(c['device']))))
+            return dict(val_dice=float(np.mean(scores)),val_loss=float(np.mean(losses)))
         state=train_phase(head,self.store,name,signature,epochs=c["VOXEL_EPOCHS"],patience=c["EARLY_STOP_PATIENCE"],lr=c["VOXEL_LR"],decay=c["WEIGHT_DECAY"],
             initial_precision="fp32",calibrate=calibrate,train_epoch=train_epoch,validate=validate,deadline=self.deadline,push_every=c["CKPT_PUSH_EVERY_EPOCHS"])
         return head,state,name
@@ -743,22 +661,23 @@ class ResearchRunner:
             if spec["backbone"]!="none":
                 graph,state,name=self.fit_graph(spec,seed,groups)
                 checkpoints["graph"]=dict(name=name,sha256=sha256_path(self.store.path(name)))
-                protocols["graph"]=dict(best_epoch=state["best_epoch"],validation_dice=state["best_score"],history=state["history"],
+                protocols["graph"]=dict(stopping_reason=state.get("stopping_reason","imported_selection"), phase_seconds_used=state.get("phase_seconds_used"), best_epoch=state["best_epoch"],validation_dice=state["best_score"],history=state["history"],
                     reconstruction_parameters=state.get("reconstruction_parameters",0),
                     parameters=sum(p.numel() for p in graph.parameters()),trained_parameters=sum(p.numel() for p in graph.parameters() if p.requires_grad),
                     best_weights_sha256=model_digest(graph))
             if spec["voxel"]:
                 head,state,name=self.fit_voxel(spec,seed,groups,graph)
                 checkpoints["voxel"]=dict(name=name,sha256=sha256_path(self.store.path(name)))
-                protocols["voxel"]=dict(best_epoch=state["best_epoch"],validation_dice=state["best_score"],history=state["history"],runtime=state["runtime"],
+                protocols["voxel"]=dict(stopping_reason=state.get("stopping_reason","imported_selection"), phase_seconds_used=state.get("phase_seconds_used"), best_epoch=state["best_epoch"],validation_dice=state["best_score"],history=state["history"],runtime=state["runtime"],
                     parameters=sum(p.numel() for p in head.parameters()),best_weights_sha256=model_digest(head))
+            build_rows=[json.loads(p.read_text()) for p in self.store.path(f"graphs/slic_{spec['n_segments']}/marker").parent.glob('*.build.json')]
             graph_stats=[]
             for data,_ in groups["train"]:
                 graph_stats.append(dict(nodes=sum(data[nt].num_nodes for nt in self.c["NODE_TYPES"]),
                     edges=sum(data[et].edge_index.shape[1] for et in data.edge_types)))
             self.store.save(self.completion_name(spec,seed),dict(plan=self.key,spec=spec,seed=seed,checkpoints=checkpoints,protocols=protocols,
                 graph_size_mean={key:float(np.mean([v[key] for v in graph_stats])) for key in ("nodes","edges")},
-                selection="validation only",test_evaluated=False),push=True)
+                graph_construction=dict(measured_cases=len(build_rows), seconds_total=sum(r["seconds"] for r in build_rows), scope="fresh pilot graph builds" if self.settings.get("pilot") else "cached main graphs; consult Part 1 build receipt"), selection="validation only",test_evaluated=False),push=True)
         finally:
             del graph,head
             import gc
@@ -860,11 +779,15 @@ class ResearchRunner:
                 raw_summaries.append(dict(experiment=spec["name"],seed=seed,**summarize_metric_rows([r["raw_metrics"] for r in rows])))
                 trained=self.completion(spec,seed)
                 protocols=trained["protocols"]
-                entry=dict(experiment=spec["name"],seed=seed,n_segments_per_partition=spec["n_segments"],n_patients=len(rows),
+                entry=dict(graph_stopping_reason=protocols.get("graph",{}).get("stopping_reason"), voxel_stopping_reason=protocols.get("voxel",{}).get("stopping_reason"), experiment=spec["name"],seed=seed,n_segments_per_partition=spec["n_segments"],n_patients=len(rows),
                     graph_parameters=protocols.get("graph",{}).get("parameters",0),
                     voxel_parameters=protocols.get("voxel",{}).get("parameters",0),
                     graph_best_epoch=protocols.get("graph",{}).get("best_epoch"),
                     voxel_best_epoch=protocols.get("voxel",{}).get("best_epoch"),
+                    graph_construction_seconds=trained.get('graph_construction',{}).get('seconds_total'),
+                    graph_nodes_mean=trained.get('graph_size_mean',{}).get('nodes'),
+                    graph_edges_mean=trained.get('graph_size_mean',{}).get('edges'),
+                    graph_training_seconds=sum(r.get('seconds',r.get('epoch_seconds',0)) for r in protocols.get('graph',{}).get('history',[])),
                     cached_graph_inference_seconds_mean=float(np.mean([r["cached_graph_inference_seconds"] for r in rows])),
                     inference_peak_cuda_bytes=max(r["peak_cuda_bytes"] for r in rows),
                     recorded_training_seconds=sum(h["seconds"] for p in protocols.values() for h in p["history"]),
@@ -874,7 +797,9 @@ class ResearchRunner:
                 table.append(entry)
         report=dict(plan=self.key,split=split,debug=self.manifest["debug"],runs=summaries,
             raw_runs=raw_summaries,
-            comparisons=paired_summary(records),runtime_scope="metadata read + graph/CNN inference + postprocess; excludes graph building and metrics")
+            comparisons=paired_summary(records),
+            graph_only_controls=(paired_summary([r for r in records if r['experiment'] in ('no_voxel','graphsage_backbone','fixed_shared_hops')],reference='no_voxel')
+                if {'no_voxel','graphsage_backbone','fixed_shared_hops'} <= {r['experiment'] for r in records} else None),runtime_scope="metadata read + graph/CNN inference + postprocess; excludes graph building and metrics")
         self.store.save(f"reports/{split}_report.json",report,push=True)
         csv_name=f"reports/{split}_patients.csv"
         fields=["experiment","seed","case_id","cached_graph_inference_seconds","peak_cuda_bytes"]+list(records[0]["metrics"])

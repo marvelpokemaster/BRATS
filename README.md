@@ -1,125 +1,104 @@
-# BraTS continuation v6 — Parts 2, 3, 4 and 5
+# BraTS practical v8: five Molab sessions
 
-Start with [RUN_NEXT.md](RUN_NEXT.md). This package continues the GitHub
-`part1_corrected.ipynb` that was already running. It does not contain a replacement
-Part 1. The fetched source commit is recorded in `source_provenance.json`.
+This replaces the expansive v7 experiment schedule. Start with RUN_NEXT.md.
+The target is five sessions, each at most 12 hours. Work budgets are 9.5 hours
+per session, reserving 2.5 hours for ZIP creation/transfer. These are stop rules,
+not measured RTX PRO 6000 completion guarantees. Long individual operations and
+slow uploads can exceed the reserve. Actual validation quality remains unknown.
 
-## What changed
+## Main method
 
-The GitHub Part 2 combined refinement, a large experiment grid, independent
-baselines, diagnostics and Shapley work in one reactive notebook. Enabling its
-switches did not solve the runtime limit: its research runner rejected the now
-enabled reconstruction objective, and its 300-case debug cap prevented final test
-reporting. Per-artifact checkpoint and receipt uploads also caused many Hub writes.
+- 15,000 SLIC regions per T1ce/FLAIR partition; all four MRI modalities in node features.
+- HGT with two layers and the existing 128 hidden channels.
+- Learned additional depth mixture over k=0,1,2; fixed shared two-hop control.
+- Structural refinement and masked feature/correspondence reconstruction OFF.
+- Dice + weighted cross entropy, without focal/boundary auxiliary loss.
+- Effective graph batch 8; actual physical batch calibrated up to 8, with memory
+  headroom, propagation checkpointing and safe forward/backward OOM retries.
+- Full audited patient cohort and persisted independent main splits.
+- One predeclared seed (42); no three-seed sweep or multi-seed robustness claim.
 
-The continuation copies separate these tasks into four entry points with a common
-frozen study. They support the active reconstruction objective, preserve the full
-saved patient cohort, and aggregate writes into incremental ZIP commits. The
-independent 3D U-Net now uses the resumable experiment machinery instead of its
-separate non-resumable driver. The graph/CNN architecture of the main model remains
-unchanged. Selected main-model weights are imported exactly for the matching
-default-seed full research row; they are not retrained or randomly extended.
+The hop selector still computes all its candidate depths. It is a learned mixture,
+not adaptive early-exit compute. A small learned mixture retains the advisor's
+requested effective-hop analysis without keeping the expensive k=0..4 + SSL system.
+Disabled module definitions remain in the helpers for compatible notebook wiring;
+they create no structural/reconstruction model or extra training pass in v8.
 
-## Files
+## Work retained
 
-Each numbered notebook is supplied as native marimo `.py` and matching `.ipynb`.
-Keep these eight helpers beside whichever notebook you run:
+Six main report rows: hybrid, graph-only, CNN-only, GraphSAGE graph-only,
+fixed-hop HGT graph-only, and MONAI SegResNet. These need six distinct training
+phases in total: three graph models and three voxel models. Graph-only reuses the
+main graph exactly. GraphSAGE and fixed-hop effects are compared with graph-only
+HGT, rather than attributing an absent CNN's effect to the graph architecture.
 
-`brats_protocol.py`, `brats_gpu.py`, `brats_transfer.py`, `brats_experiments.py`,
-`brats_bundles.py`, `brats_workflow.py`, `brats_reporting.py`, `baseline_3d_unet.py`.
+Each main phase has a predeclared 135-minute allowance including preparation
+inside that phase and calibration, a 100-epoch maximum and patience 15. Epochs
+can differ across models. This is a comparison under a stated compute budget;
+it is not equal-epoch training or a claim that every baseline has converged.
+The best complete validation epoch is selected. A partial epoch is discarded.
+`stopping_reason`, actual epoch counts and elapsed time are saved. At least one
+validated epoch is needed for a selectable checkpoint; meeting that minimum does
+not by itself make a model suitable for publication.
 
-Use Molab's CUDA-compatible PyTorch environment. Required Python packages are
-marimo, torch, torch-geometric, numpy, scipy, nibabel, scikit-image, matplotlib,
-kagglehub, joblib and huggingface-hub. Do not replace Molab's working CUDA Torch
-build with a CPU build. CUDA availability and a small convolution are checked
-before the long work. No custom kernel or compilation dependency was added.
+The SLIC comparison is a separate validation-only graph pilot: 64 randomly selected
+training patients and 16 validation patients, frozen once with a fixed seed,
+at 5k/10k/15k/20k regions. Every resolution, including 15k, gets fresh graph builds
+and fresh graph training on the same subset. Each has a 45-minute/20-epoch cap.
+No pilot model is tested on held-out subjects or substituted for the main model.
+This is preliminary performance/cost evidence, not a full-cohort optimum claim.
 
-## Part 1 compatibility
+Test evaluation retains per-patient raw/postprocessed WT/TC/ET Dice, HD95,
+sensitivity, precision and IoU, mean/SD, paired patient uncertainty estimates,
+5–10 varied qualitative examples, modality Shapley on ten fixed test patients,
+region hop distributions and gate/local-graph explanations. Single-seed confidence
+intervals do not establish variation across training seeds. Explanations cover
+the graph at fixed topology, not the entire graph+CNN pipeline.
 
-The importer reads the completed checkpoint, its saved architecture/configuration,
-patient split, dataset fingerprint and graph archive receipt. It supports both
-the current `stage1_graph_model.*` and earlier `stage1_graph_model_review_v3.*`
-handoff names. The current name takes priority; an incomplete current manifest
-does not silently fall back to an older run. A user-specified manifest override
-is available if there are intentionally multiple runs.
+## Transfers and compatibility
 
-Checkpoint and graph ZIP downloads use saved immutable revisions and SHA256
-checks. When an older manifest omits the checkpoint revision but has the required
-checksum, the loader pins the current repository revision and checks those bytes.
-It never loads unmatched model weights with `strict=False`, discards structural
-weights, or leaves an untrained refinement wrapper active. Incompatible legacy
-artifacts stop with an explanation instead of producing misleading predictions.
+Use all matching v8 files. A fresh Part 1 is required; v7 model weights are
+incompatible with the reduced architecture/training identity. Compatible verified
+15k graph caches can be reused. The token placeholder stays blank.
 
-Parts 2, 3 and 5 use the MRI tensors/targets already in Part 1's verified graph
-metadata. They inherit its audited cohort; they do not claim to repeat the raw-data
-audit. Part 4 downloads and audits the raw MRI to build other SLIC partitions,
-retains GitHub's patched-case path filtering, and requires the same source fingerprint.
-Every part checks the persisted patient split and selected graph weights.
+Part 1 final handoff: `stage1_practical_v8/final/catalog.zip` in the configured
+model repository. Later stores: `continuation_v8/<Part-1-hash>/...`.
+Training files/figures are coalesced in ZIP commits about every two hours and at
+stage boundaries. Final reports also have a downloadable ZIP. Graph caches keep
+their existing ZIP plus small verification receipts. No per-epoch per-file spam.
 
-## Scheduling and computation
+If a required workload does not finish within its session budget, its status is
+incomplete. The package does not silently add more sessions or fabricate the
+missing comparisons. Saved ZIPs remain recoverable after a failure, but extending
+the five-session study would be a separate budget decision.
 
-The main epoch limits, patience, graph batch setting and training objectives are
-retained. Research uses the saved Part 1 graph configuration and the continuation's
-declared voxel configuration. GPU microbatch calibration, mixed precision,
-patient-weighted accumulation and OOM retries for the voxel head are retained.
-No claim of measured RTX PRO 6000 utilization is made without a real run.
+## Dependencies and checks
 
-The default grid is reduced to 17 rows by making three extra mechanism probes
-optional. No advisor-required comparison is removed. See [RESEARCH_PLAN.md](RESEARCH_PLAN.md).
-The full model at the original seed reuses the completed Part 1/2 weights. Graph-only
-and no-boundary rows share the appropriate identical full graph checkpoint. Completed
-jobs skip their SLIC-cache reconstruction and training. Completed evaluation rows skip
-model loading/inference. Fixed random samples and per-patient records let explanations
-and evaluation resume after a pause.
+Keep all ten helper Python files beside the selected notebook. Retain Molab's
+working CUDA PyTorch and PyG installation. SegResNet adds MONAI, tested here at
+1.5.1. With the existing PyTorch/NumPy environment, install that package using
+`python -m pip install --no-deps monai==1.5.1` in both the Part 3 and Part 5
+sessions (fresh sessions may not retain installations). Other packages are
+the existing marimo, torch-geometric, numpy, scipy, nibabel, scikit-image,
+matplotlib, kagglehub, joblib and huggingface-hub dependencies.
 
-Seventeen rows across three seeds still require many sessions. Dividing the notebook
-does not make the total training cost disappear. The optional extended controls must
-be selected before the study starts. Do not change the frozen protocol after looking
-at test results. Part 5 refuses test evaluation until its whole frozen plan completes.
-Part 1 already computes its own test diagnostics, so this guard cannot undo earlier
-test exposure; disclose that research history in the manuscript.
+Local checks use tiny synthetic CPU graphs/volumes and a fake Hub. They cover
+actual HGT/GraphSAGE/CNN/SegResNet training, test gating, SLIC separation, budget
+stops, the actual Part 1/2 adapters, ZIP handoff and marimo scope. No full patient
+training, actual GPU timing, live Hub writes or journal-readiness certification
+was performed. See the validation JSON files and ADVISOR_SCOPE.md.
 
-## ZIP transfer design
+## Reference scope
 
-Local completed-epoch checkpoints are frequent. Remote synchronization is limited
-to approximately two-hour intervals and clean pause/completion/error boundaries.
-All updated artifacts enter ZIPs; one atomic Hub commit contains the changed-data
-ZIP(s) and `catalog.zip`. Files are split into roughly 2 GiB archives where possible;
-an individual larger artifact remains a larger archive. The catalog records each
-file's checksum and which ZIP contains its current version. New sessions pin one
-catalog commit and restore only needed bundles. Unchanged files are not reuploaded.
-The original Part 1 graph repository is read-only to these continuation notebooks.
+The supplied Saueressig et al. paper already uses graph segmentation followed by
+CNN refinement: https://arxiv.org/abs/2109.05580 . Do not claim that sequence alone
+is novel. Its reported 15k resolution motivates a reference point, not proof that
+15k is optimal for these two partitions or this internal split.
 
-The final human-readable report ZIP is also published once at the printed model
-repository path. Small receipt files remain inside the catalog bundles. Authentication
-errors propagate; rate-limit/service-busy responses get bounded retries. Failed
-uploads preserve local files. A stale concurrent writer is rejected. Do not delete
-older bundle ZIPs manually: the latest catalog may still reference them.
+The supplied 2025.I2.050 paper uses a different transformer/DeepLab-based method
+and dataset/evaluation setup. Its published scores are background, not a matched
+baseline or a basis for claiming superiority. The narrower candidate contribution
+is the typed multimodal HGT + bounded learned-hop mixture and its measured
+cost/segmentation/explanation behavior under this stated protocol.
 
-Full graph/SLIC metadata are large. Disk must accommodate raw data where needed,
-downloaded archives, extracted metadata and temporary ZIP copies. Free-space checks
-stop rather than report a failed save as successful. Available GPU VRAM alone does
-not establish enough host RAM or disk. A hard kill loses unflushed work and a
-9.5-hour work budget cannot guarantee upload completion before 12 hours.
-
-## Evidence and limitations
-
-See `marimo_validation.json`, `research_validation.json` and
-`continuation_validation.json` for the checks actually performed. Tests use tiny
-synthetic CPU graphs/volumes and a mocked Hub, including fresh-session restoration,
-corruption, failed uploads, rate limiting, SSL gradients, exact selected-weight reuse,
-U-Net training, reporting and interruption/resume. These are not BraTS results.
-
-The two supplied reference papers continue to inform the component comparisons:
-Saueressig et al. (2109.05580v2) already introduced a graph-plus-CNN pipeline;
-Abd-Elhafiez (2025.I2.050) motivates testing boundary supervision. The GraphSAGE
-control is not an exact reimplementation of the first paper, and neither paper's
-unmatched published metrics establish superiority on this internal split.
-
-Actual CUDA behavior, full-cohort runtime/storage, live transfers and learned
-performance remain to be measured. This code cannot guarantee a bug-free Molab run
-or journal acceptance. A strong independently configured baseline/external cohort
-may still be needed for stronger claims than this component study supports.
-
-Implementation references: [Hugging Face uploads](https://huggingface.co/docs/huggingface_hub/guides/upload)
-and [marimo variable definitions](https://docs.marimo.io/guides/understanding_errors/multiple_definitions/).
+MONAI SegResNet API: https://monai.readthedocs.io/en/1.5.1/networks.html#segresnet

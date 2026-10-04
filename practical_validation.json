@@ -1,0 +1,17 @@
+{
+  "checks": [
+    "All six main phases run actual HGT/GraphSAGE/CNN/MONAI SegResNet forward-backward on tiny CPU volumes",
+    "Graph-only uses the exact same graph checkpoint as the hybrid with no retraining",
+    "Main voxel histories retain training Dice, validation loss/full-volume Dice and honest stop metadata",
+    "Six-row held-out evaluation/metrics/paired graph controls complete and rerunning completed work reuses checkpoints",
+    "SLIC pilot rebuilds exactly its frozen train/validation subjects at all resolutions and never uses test IDs",
+    "Fresh graph-only SLIC pilot training and its validation cost report execute separately from the held-out study",
+    "Actual Part 2 completion adapter saves a compatible main checkpoint and plotted training/validation curves",
+    "Phase/session limits discard partial updates and select only the last completed validated checkpoint",
+    "Zero validated epochs remain incomplete; non-budget errors propagate",
+    "Actual revised Part 1 training cell executes and completed reruns preserve selected weights",
+    "All five notebook configurations share the reduced architecture, adaptive batch cap 8 and blank token placeholder"
+  ],
+  "real_gpu_run": false,
+  "live_hub_writes": false
+}

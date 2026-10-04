@@ -1,0 +1,27 @@
+[
+  {
+    "file": "part1_corrected.ipynb",
+    "returncode": 0,
+    "output": ""
+  },
+  {
+    "file": "part2_refinement.ipynb",
+    "returncode": 0,
+    "output": ""
+  },
+  {
+    "file": "part3_experiments.ipynb",
+    "returncode": 0,
+    "output": ""
+  },
+  {
+    "file": "part4_slic_study.ipynb",
+    "returncode": 0,
+    "output": ""
+  },
+  {
+    "file": "part5_reports.ipynb",
+    "returncode": 0,
+    "output": ""
+  }
+]

@@ -19,32 +19,10 @@ def download_or_none(token, repo_id, repo_type, name, revision):
 
 
 def load_part1(token, repo_id, repo_type='model', manifest_name=''):
-    from huggingface_hub import HfApi
-    api=HfApi(token=token)
-    head=api.repo_info(repo_id=repo_id,repo_type=repo_type).sha
-    names=[manifest_name] if manifest_name else ['stage1_graph_model.manifest.json','stage1_graph_model_review_v3.manifest.json']
-    for name in names:
-        path=download_or_none(token,repo_id,repo_type,name,head)
-        if path is not None: break
-    else:
-        raise RuntimeError('Part 1 final handoff is not present yet. Let Part 1 finish its upload; do not restart its training.')
-    manifest=json.loads(Path(path).read_text())
-    ckpt_name=name.replace('.manifest.json','.pt')
-    revision=manifest.get('checkpoint_revision') or head
-    ckpt_path=download_or_none(token,repo_id,repo_type,ckpt_name,revision)
-    if ckpt_path is None or not manifest.get('sha256') or sha256_path(ckpt_path)!=manifest['sha256']:
-        raise RuntimeError('Part 1 checkpoint/checksum does not match its handoff; wait for the completed upload.')
-    checkpoint=torch.load(ckpt_path,map_location='cpu',weights_only=False)
-    required=('split','split_fingerprint','dataset_fingerprint','run_config','model_state_dict','class_weights')
-    if any(k not in checkpoint for k in required):
-        raise RuntimeError('This legacy checkpoint lacks audited split/configuration metadata. It cannot safely be relabelled as the current study; keep the running Part 1 intact and inspect its final artifact.')
-    if not checkpoint.get('training_complete') or not manifest.get('training_complete'):
-        raise RuntimeError('Part 1 is still incomplete; continue only after its final handoff.')
-    receipt=manifest.get('graph_cache') or {}
-    if not receipt.get('complete') or not receipt.get('revision') or not receipt.get('sha256'):
-        raise RuntimeError('Part 1 graph ZIP handoff is incomplete. Wait for its final graph archive upload.')
-    return dict(checkpoint=checkpoint,manifest=manifest,path=ckpt_path,sha256=manifest['sha256'],
-                manifest_name=name,checkpoint_name=ckpt_name,head_revision=head,api=api)
+    from brats_graph import load_part1_bundle
+    if manifest_name:
+        raise ValueError('Practical v8 reads its completed ZIP catalog; leave the manifest override blank.')
+    return load_part1_bundle(token,repo_id,repo_type)
 
 
 def load_exact_model(model, base_model, checkpoint, identity, dataset_fingerprint, rec_module=None):
@@ -70,8 +48,8 @@ def load_exact_model(model, base_model, checkpoint, identity, dataset_fingerprin
 
 def make_store(context, key, root=None):
     c=context
-    return ZipStore(root or Path(c['PERSISTENT_BASE'])/'continuation_v6'/key,
-        'continuation_v6/'+c['STAGE1_MODEL_SHA256'][:20]+'/'+key,
+    return ZipStore(root or Path(c['PERSISTENT_BASE'])/'continuation_v8'/key,
+        'continuation_v8/'+c['STAGE1_MODEL_SHA256'][:20]+'/'+key,
         dict(stage1_sha256=c['STAGE1_MODEL_SHA256'],key=key),
         api=c['hf_api'] if c['HF_ENABLED'] else None,
         download=lambda name,rev:c['hf_try_download'](name,c['HF_MODEL_REPO_ID'],c['HF_MODEL_REPO_TYPE'],revision=rev),

@@ -1,0 +1,8 @@
+{
+  "checks": [
+    "New Part 1 final checkpoint and manifest publish in one ZIP-only commit and restore through actual continuation importer",
+    "100 rolling saves coalesce until flush; fresh session restores selected microbatch and latest weights",
+    "Old training protocol is refused instead of mixing old weights with corrected structural/loss semantics"
+  ],
+  "live_hub_writes": false
+}

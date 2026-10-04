@@ -70,7 +70,7 @@ def run_advisor_reports(c,store):
     def check():
         if time.time()>=c['SESSION_DEADLINE']:raise BudgetPause('Advisor reports paused; rerun Part 5')
     status=dict(complete=False,paused=False)
-    test=c['test_items'];selected=random.Random(c['SEED']+703).sample(test,min(20,len(test)))
+    test=c['test_items'];selected=random.Random(c['SEED']+703).sample(test,min(10,len(test)))
     store.save('reports/scope.json',dict(stage1_sha256=c['STAGE1_MODEL_SHA256'],
         graph_scope='Graph branch only, fixed topology; no CNN/SLIC attribution',
         hop_scope='Node-majority regions, unweighted node histograms; additional propagation after HGT',
@@ -138,6 +138,18 @@ def run_advisor_reports(c,store):
         store.save('reports/main_training_history.json',dict(graph=c['stage1_checkpoint'].get('history',[]),
             refinement=c['MAIN_STAGE2_STATE']['vox_history'],graph_best_epoch=c['stage1_checkpoint']['best_epoch'],
             refinement_best_epoch=c['MAIN_STAGE2_STATE']['best_vox_epoch']))
+        pilot = main_store.read('slic_pilot_receipt.json') if main_store is not None else None
+        store.save('reports/slic_pilot_scope.json',pilot or {'complete':False,'message':'SLIC pilot not supplied'})
+        if pilot:
+            pilot_store=c['RESEARCH_STORE_FACTORY'](pilot['plan'])
+            for name in pilot_store.catalog['files']:
+                if name.startswith(('reports/','evaluation/')) or name=='protocol.json':
+                    check();store.add_file(pilot_store.pull(name),'slic_pilot/'+name)
+        status['advisor_evidence_complete']=bool(pilot and pilot.get('complete'))
+        status['publication_ready_certified']=False
+        store.save('reports/claims_scope.json',dict(single_seed=True,training_is_compute_limited=True,
+            multi_seed_reproducibility_established=False,slic_is_validation_pilot=True,
+            journal_readiness_requires_assessment_of_actual_curves_and_results=True))
         archive=export_reports_zip(store.root,store.path('final_reports.zip'))
         store.push('final_reports.zip')
         status.update(complete=True,local_export=str(archive))
@@ -148,10 +160,10 @@ def run_advisor_reports(c,store):
             saved=store.read('final_export_receipt.json')
             if saved is None or saved.get('sha256')!=sha256_path(archive):
                 receipt=upload_verified(store.api,lambda **kw:store.download(kw['filename'],kw['revision']),
-                    archive,'continuation_v6/'+c['STAGE1_MODEL_SHA256'][:20]+'/final_reports.zip',
+                    archive,'continuation_v8/'+c['STAGE1_MODEL_SHA256'][:20]+'/final_reports.zip',
                     store.repo_id,store.repo_type,'Final BraTS report ZIP')
                 store.save('final_export_receipt.json',receipt)
-            print('Final report ZIP is in your model repository under continuation_v6/'+c['STAGE1_MODEL_SHA256'][:20]+'/final_reports.zip')
+            print('Final report ZIP is in your model repository under continuation_v8/'+c['STAGE1_MODEL_SHA256'][:20]+'/final_reports.zip')
     except BudgetPause as exc:
         status.update(paused=True,message=str(exc));store.save('report_status.json',status)
     finally:

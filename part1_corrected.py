@@ -307,7 +307,7 @@ def _():
     BUILD_BUDGET_HOURS = 7.0
     TRAIN_BUDGET_HOURS = 10.5
     CKPT_PUSH_EVERY_EPOCHS = 5
-    RESUME_STAGE1 = True
+    RESUME_STAGE1 = False
     EARLY_STOP_PATIENCE = 15
     print(f"[Part 1] Started. Build budget {BUILD_BUDGET_HOURS:.1f}h, train budget {TRAIN_BUDGET_HOURS:.1f}h (hard cap {SESSION_HARD_CAP_HOURS:.0f}h).")
     return (

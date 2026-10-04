@@ -142,7 +142,7 @@ def _():
     HOP_TEMPERATURE = 1.0       # softmax temperature; keep 1.0 for the main experiment
     DROPOUT = 0.1
     EPOCHS = 100
-    BATCH_SIZE = 64
+    BATCH_SIZE = 16
     LR = 1e-3
     WEIGHT_DECAY = 1e-4
     DICE_WEIGHT = 1.0

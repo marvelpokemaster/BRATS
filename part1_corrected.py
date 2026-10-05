@@ -1239,7 +1239,7 @@ def _(
     def partition_ceiling(files, n_segments, compactness):
         t0 = time.time()
         d, m = build_hetero_case(files, n_segments=n_segments, compactness=compactness)
-        row = dict(case=os.path.basename(os.path.dirname(files["t1"])), k=n_segments,
+        row = dict(case=get_case_id(files), k=n_segments,
                    nodes=int(d["t1ce"].x.size(0)), secs=time.time() - t0)
         row.update({f"hard_{k[5:]}": v for k, v in oracle_metrics(d, m, soft=False).items()})
         row.update({f"soft_{k[5:]}": v for k, v in oracle_metrics(d, m, soft=True).items()})
@@ -2317,15 +2317,18 @@ def _(
         return hf_push_graph_cache_zip()
 
     hf_pull_graph_cache_zip()
+    # --- ORPHAN CLEANUP ---
+    _audited_ids = set([get_case_id(c[1]) for c in valid_cases])
+    for _root, _dirs, _files in os.walk(GRAPH_CACHE_PATH):
+        for _f in _files:
+            if _f.endswith((".graph.pt", ".meta.pt")):
+                _cid = _f.split(".")[0]
+                if _cid not in _audited_ids:
+                    os.remove(os.path.join(_root, _f))
+                    print(f"Removed orphan cache file: {_f}")
+    # ----------------------
     
-    # --- ONE-TIME CLEANUP FOR MISLABELED KAGGLE PATIENTS ---
-    # Delete potentially poisoned caches from the previous bug so they are forced to rebuild correctly.
-    for _bad_id in ["BraTS2021_00495", "BraTS2021_00621"]:
-        for _ext in [".graph.pt", ".meta.pt"]:
-            _bad_path = os.path.join(GRAPH_CACHE_PATH, _bad_id + _ext)
-            if os.path.exists(_bad_path):
-                os.remove(_bad_path)
-    # --------------------------------------------------------
+
     _todo = missing_cases()
     _built_any = False
     if _todo:
@@ -2400,6 +2403,8 @@ def _(
     if len(graph_items) != len(valid_cases):
         raise RuntimeError("Graph build is incomplete; resume cache construction before splitting")
     _unique_items = {os.path.basename(m).replace(".meta.pt", ""): (d, m) for d, m in graph_items}
+    if len(_unique_items) != EXPECTED_CASES:
+        raise RuntimeError(f"Cohort guard failed: expected {EXPECTED_CASES} unique graphs, got {len(_unique_items)}")
     _ordered = sorted(_unique_items.values(), key=lambda item: os.path.basename(item[1]).replace(".meta.pt", ""))
     random.Random(SEED).shuffle(_ordered)
     n_items = len(_ordered)

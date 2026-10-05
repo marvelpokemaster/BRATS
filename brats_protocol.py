@@ -12,6 +12,27 @@ import numpy as np
 
 PROTOCOL_VERSION = "review-v3-full-volume"
 MODALITY_ORDER = ("t1", "t1ce", "t2", "flair")
+CASE_ID_PATTERN = re.compile(r"BraTS2021_\d+", re.IGNORECASE)
+
+
+def case_id_from_path(path):
+    """Canonical BraTS2021 ID parsed from the NIfTI filename, never the folder."""
+    match = CASE_ID_PATTERN.search(Path(path).name)
+    if not match:
+        raise ValueError(f"Unrecognized case ID: {Path(path).name}")
+    return "BraTS2021_" + match.group(0).split("_")[-1]
+
+
+def select_canonical_nifti(paths):
+    """Keep NIfTI files stored in a folder named after their own case ID.
+
+    The Kaggle mirror adds BraTS2021_00495.tar / BraTS2021_00621.tar whose files
+    sit at the archive root; they are byte-identical to the foldered copies in
+    BraTS2021_Training_Data.tar. Extracted into a shared directory, those loose
+    copies would share one parent folder, so only foldered copies are canonical.
+    """
+    return [p for p in paths
+            if CASE_ID_PATTERN.search(Path(p).name) and Path(p).parent.name == case_id_from_path(p)]
 
 
 def region_masks(seg):
@@ -220,11 +241,11 @@ def audit_dataset(all_paths, modality_kind, output_dir, expected_count=1251, exc
         kind = modality_kind(path)
         if not kind:
             continue
-        match = re.search(r"BraTS2021_\d+", Path(path).name, re.IGNORECASE)
-        if not match:
+        try:
+            case_id = case_id_from_path(path)
+        except ValueError:
             errors.append(f"Unrecognized case ID: {Path(path).name}")
             continue
-        case_id = "BraTS2021_" + match.group(0).split("_")[-1]
         groups.setdefault(case_id, {}).setdefault(kind, []).append(path)
     complete, records, content_ids = [], {}, {}
     required = (*MODALITY_ORDER, "seg")

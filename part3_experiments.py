@@ -905,13 +905,15 @@ def _(
     _nb_dir = _os.path.dirname(_os.path.abspath(globals().get("__file__", "notebook.py"))) if '__file__' in globals() else _os.getcwd()
     if _nb_dir not in _sys.path: _sys.path.insert(0, _nb_dir)
     from brats_protocol import (PROTOCOL_VERSION, segmentation_metrics, summarize_metric_rows,
-                                mean_region_dice, sliding_window_predict, make_training_patch, audit_dataset)
+                                mean_region_dice, sliding_window_predict, make_training_patch, audit_dataset,
+                                case_id_from_path)
     from brats_gpu import (bounded_prefetch, patient_groups, configure_gpu, amp_context, train_patient_group, train_voxel_experiment)
     from brats_transfer import (upload_verified, verify_remote, extract_verified_zip, write_json_atomic)
 
     return (
         NUM_CLASSES,
         PROTOCOL_VERSION,
+        case_id_from_path,
         crop,
         crop_bounds,
         extract_verified_zip,
@@ -1995,6 +1997,7 @@ def _(
     N_SEGMENTS,
     STAGE1_HANDOFF_MANIFEST,
     build_hetero_case,
+    case_id_from_path,
     config_hash,
     extract_verified_zip,
     hf_try_download,
@@ -2016,9 +2019,7 @@ def _(
 
 
     def get_case_id(files):
-        import re
-        match = re.search(r"BraTS2021_\d+", os.path.basename(files["t1"]), re.IGNORECASE)
-        return "BraTS2021_" + match.group(0).split("_")[-1]
+        return case_id_from_path(files["t1"])
 
 
     def cache_paths(case_id):

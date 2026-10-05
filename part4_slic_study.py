@@ -673,6 +673,7 @@ def _(
     kagglehub,
     os,
     re,
+    select_canonical_nifti,
 ):
     import tarfile
 
@@ -720,13 +721,8 @@ def _(
 
     all_nii = glob.glob(os.path.join(dataset_root, "**", "*.nii"), recursive=True)
     all_nii = all_nii + glob.glob(os.path.join(dataset_root, "**", "*.nii.gz"), recursive=True)
-    # Remove unpatched duplicates from the main tar so the official patches are used
-    all_nii = [p for p in all_nii if not ("/BraTS2021_00495/BraTS2021_00495_" in p.replace("\\", "/")) and not ("/BraTS2021_00621/BraTS2021_00621_" in p.replace("\\", "/"))]
-    case_map = {}
-    for _p in all_nii:
-        _k = modality_kind(_p)
-        if _k:
-            case_map.setdefault(os.path.dirname(_p), {})[_k] = _p
+    # Canonical copies live in BraTS2021_XXXXX/ folders; the loose patch-tar copies are byte-identical duplicates.
+    all_nii = select_canonical_nifti(all_nii)
 
     _official_ids = None
     if OFFICIAL_CASE_IDS_PATH:
@@ -977,7 +973,8 @@ def _(
     _nb_dir = _os.path.dirname(_os.path.abspath(globals().get("__file__", "notebook.py"))) if '__file__' in globals() else _os.getcwd()
     if _nb_dir not in _sys.path: _sys.path.insert(0, _nb_dir)
     from brats_protocol import (PROTOCOL_VERSION, segmentation_metrics, summarize_metric_rows,
-                                mean_region_dice, sliding_window_predict, make_training_patch, audit_dataset)
+                                mean_region_dice, sliding_window_predict, make_training_patch, audit_dataset,
+                                case_id_from_path, select_canonical_nifti)
     from brats_gpu import (bounded_prefetch, patient_groups, configure_gpu, amp_context, train_patient_group, train_voxel_experiment)
     from brats_transfer import (upload_verified, verify_remote, extract_verified_zip, write_json_atomic)
 
@@ -985,6 +982,7 @@ def _(
         NUM_CLASSES,
         PROTOCOL_VERSION,
         audit_dataset,
+        case_id_from_path,
         crop,
         crop_bounds,
         extract_verified_zip,
@@ -992,6 +990,7 @@ def _(
         load_meta,
         postprocess_prediction_auto,
         segmentation_metrics,
+        select_canonical_nifti,
         sliding_window_predict,
         write_json_atomic,
     )
@@ -2068,6 +2067,7 @@ def _(
     N_SEGMENTS,
     STAGE1_HANDOFF_MANIFEST,
     build_hetero_case,
+    case_id_from_path,
     config_hash,
     extract_verified_zip,
     hf_try_download,
@@ -2089,9 +2089,7 @@ def _(
 
 
     def get_case_id(files):
-        import re
-        match = re.search(r"BraTS2021_\d+", os.path.basename(files["t1"]), re.IGNORECASE)
-        return "BraTS2021_" + match.group(0).split("_")[-1]
+        return case_id_from_path(files["t1"])
 
 
     def cache_paths(case_id):
@@ -2143,6 +2141,13 @@ def _(
         print(f"[HF] Verified and extracted {_count} graph-cache files")
 
     hf_pull_graph_cache_zip()
+    # --- ORPHAN CLEANUP: drop cache files whose stem is not an audited case ID ---
+    _audited_ids = set(DATASET_AUDIT["cases"])
+    for _root, _dirs, _files in os.walk(GRAPH_CACHE_PATH):
+        for _f in _files:
+            if _f.endswith((".graph.pt", ".meta.pt")) and _f.split(".")[0] not in _audited_ids:
+                os.remove(os.path.join(_root, _f))
+                print(f"Removed orphan cache file: {_f}")
     if missing_cases():
         raise RuntimeError("Part2 requires the complete verified Part1 graph ZIP; cache rebuild is disabled")
     graph_build_complete = True

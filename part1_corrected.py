@@ -2317,6 +2317,15 @@ def _(
         return hf_push_graph_cache_zip()
 
     hf_pull_graph_cache_zip()
+    
+    # --- ONE-TIME CLEANUP FOR MISLABELED KAGGLE PATIENTS ---
+    # Delete potentially poisoned caches from the previous bug so they are forced to rebuild correctly.
+    for _bad_id in ["BraTS2021_00495", "BraTS2021_00621"]:
+        for _ext in [".graph.pt", ".meta.pt"]:
+            _bad_path = os.path.join(GRAPH_CACHE_PATH, _bad_id + _ext)
+            if os.path.exists(_bad_path):
+                os.remove(_bad_path)
+    # --------------------------------------------------------
     _todo = missing_cases()
     _built_any = False
     if _todo:

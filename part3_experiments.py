@@ -2016,7 +2016,9 @@ def _(
 
 
     def get_case_id(files):
-        return os.path.basename(os.path.dirname(files["t1"]))
+        import re
+        match = re.search(r"BraTS2021_\d+", os.path.basename(files["t1"]), re.IGNORECASE)
+        return "BraTS2021_" + match.group(0).split("_")[-1]
 
 
     def cache_paths(case_id):

@@ -130,7 +130,11 @@ class SegResNetBaseline(torch.nn.Module):
         self.amp_dtype=None
 
     def forward(self,x):
-        return self.net(x), None
+        # SegResNet downsamples 3x, so pad every spatial dim to a multiple of 8, then crop back.
+        _size = x.shape[2:]
+        _pad = [v for n in reversed(_size) for v in (0, (-n) % 8)]
+        _out = self.net(torch.nn.functional.pad(x, _pad) if any(_pad) else x)
+        return _out[(slice(None), slice(None)) + tuple(slice(0, n) for n in _size)], None
 
 
 def run_slic_pilot(context, settings, main_store):

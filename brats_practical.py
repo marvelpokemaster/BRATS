@@ -1,12 +1,22 @@
-"""Predeclared compute-limited training; a budget stop is not convergence."""
+"""Convergence-protocol training (v9).
+
+Every main row trains to an epoch cap with early stopping on validation Dice and
+keeps the best-validation checkpoint. There is no training-time cap. A session
+that runs out of time saves the last completed epoch and raises BudgetPause; the
+next session resumes from it. A pause never marks training complete.
+The separate SLIC pilot keeps its own declared per-phase allowance.
+"""
 import copy
 import time
 import numpy as np
 import torch
 
-PHASE_SECONDS = 135 * 60
-PILOT_SECONDS = 45 * 60
+COMPUTE_PROTOCOL = 'convergence-v9'
+PHASE_SECONDS = None          # no per-phase training-time cap for main rows
+PILOT_SECONDS = 45 * 60       # validation-only SLIC pilot keeps its declared allowance
+EPOCH_SAFETY = 1.15           # pause instead of starting an epoch that cannot finish
 MAIN_ROWS = ('full', 'no_voxel', 'cnn_only', 'graphsage_backbone', 'fixed_shared_hops', 'segresnet')
+FINAL_REASONS = ('early_stopping', 'epoch_cap')
 
 
 class PhaseLimit(RuntimeError):
@@ -14,17 +24,23 @@ class PhaseLimit(RuntimeError):
 
 
 class PhaseClock:
-    def __init__(self, session, seconds=PHASE_SECONDS, spent=0.):
-        self.session, self.seconds, self.spent = session, float(seconds), float(spent)
+    """Cumulative training seconds across sessions; optional pilot-only allowance."""
+    def __init__(self, session, seconds=None, spent=0.):
+        self.session = session
+        self.seconds = None if seconds is None else float(seconds)
+        self.spent = float(spent)
         self.start = time.monotonic()
 
     def elapsed(self):
         return self.spent + time.monotonic() - self.start
 
+    def remaining(self):
+        return self.session.remaining() if hasattr(self.session, 'remaining') else None
+
     def check(self):
         self.session.check()
-        if self.elapsed() >= self.seconds:
-            raise PhaseLimit('Predeclared training compute limit reached')
+        if self.seconds is not None and self.elapsed() >= self.seconds:
+            raise PhaseLimit('Predeclared pilot training allowance reached')
 
 
 def train_phase(model, store, name, signature, *, epochs, patience, lr, decay,
@@ -35,7 +51,7 @@ def train_phase(model, store, name, signature, *, epochs, patience, lr, decay,
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=lr*.02)
     state = store.read(name)
     if state and state['signature'] != signature:
-        raise RuntimeError('Compute-limited checkpoint identity mismatch')
+        raise RuntimeError('Training checkpoint identity mismatch for ' + name)
     if state:
         model.load_state_dict(state['model'])
         optimizer.load_state_dict(state['optimizer']); scheduler.load_state_dict(state['scheduler'])
@@ -54,64 +70,88 @@ def train_phase(model, store, name, signature, *, epochs, patience, lr, decay,
     best_score = state['best_score'] if state else -1.
     best_epoch = state['best_epoch'] if state else 0
     stale = state['stale'] if state else 0
+    sessions = (state.get('sessions', 0) if state else 0) + 1
     allowance = getattr(deadline, 'phase_seconds', PHASE_SECONDS)
     clock = PhaseClock(deadline, allowance, state.get('phase_seconds_used', 0.) if state else 0.)
     validated = bool(state and state.get('precision_validated'))
+    protocol = COMPUTE_PROTOCOL if allowance is None else 'practical-v8-compute-limited'
 
     def snapshot(complete=False, reason='in_progress'):
         return dict(signature=signature, epoch=epoch, model=cpu_state(model), optimizer=optimizer.state_dict(),
             scheduler=scheduler.state_dict(), scaler=scaler.state_dict(), rng=rng_state(), best=best,
             best_score=best_score, best_epoch=best_epoch, stale=stale, history=history, complete=complete,
             runtime=runtime, precision_validated=validated, stopping_reason=reason,
-            phase_seconds_limit=allowance, phase_seconds_used=clock.elapsed(),
-            protocol='practical-v8-compute-limited', convergence_demonstrated=False)
+            phase_seconds_limit=allowance, phase_seconds_used=clock.elapsed(), training_seconds=clock.elapsed(),
+            sessions=sessions, epoch_cap=epochs, patience=patience, protocol=protocol,
+            convergence_demonstrated=False)
 
     if state is None:
         store.save(name, snapshot(), push=True)
     reason = 'epoch_cap'
     try:
         clock.check()
-        # Includes calibration/cache preparation in the declared phase allowance.
-        runtime = calibrate(runtime['precision'] if validated else None, clock)
-        validated = True
-        scaler = torch.amp.GradScaler('cuda', enabled=dev.type=='cuda' and runtime['precision']=='fp16')
-        if state and state.get('precision_validated'):
-            scaler.load_state_dict(state['scaler'])
-        store.save(name, snapshot(), push=True)
-        for next_epoch in range(epoch+1, epochs+1):
-            clock.check()
-            if history and clock.elapsed() + 1.15*history[-1]['seconds'] >= allowance:
-                reason = 'compute_budget'; break
-            started = time.monotonic()
-            if dev.type=='cuda': torch.cuda.reset_peak_memory_stats(dev)
-            model.train()
-            metrics = train_epoch(next_epoch, optimizer, scaler, runtime, clock)
-            model.eval()
-            validation = validate(clock)
-            validation = validation if isinstance(validation, dict) else dict(val_dice=float(validation))
-            score = float(validation['val_dice'])
-            if not np.isfinite(score): raise FloatingPointError('Non-finite validation Dice')
-            scheduler.step(); epoch = next_epoch
-            history.append(dict(epoch=epoch, seconds=time.monotonic()-started,
-                peak_cuda_bytes=torch.cuda.max_memory_allocated(dev) if dev.type=='cuda' else 0,
-                **metrics, **validation))
-            if score > best_score:
-                best_score, best_epoch, stale, best = score, epoch, 0, cpu_state(model)
-            else: stale += 1
-            store.save(name, snapshot(), push=epoch % push_every==0)
-            print(f'[{name}] epoch {epoch}: val Dice={score:.4f}; phase {clock.elapsed()/60:.1f}/{allowance/60:.0f} min', flush=True)
-            if stale>=patience:
-                reason='early_stopping'; break
-    except (PhaseLimit, BudgetPause) as exc:
-        reason = 'compute_budget' if isinstance(exc,PhaseLimit) else 'session_budget'
+        if stale >= patience:
+            # A previous session saved the patience-triggering epoch but stopped before finalizing.
+            reason = 'early_stopping'
+        else:
+            # Includes calibration/cache preparation; repeated on every resumed session.
+            runtime = calibrate(runtime['precision'] if validated else None, clock)
+            validated = True
+            scaler = torch.amp.GradScaler('cuda', enabled=dev.type=='cuda' and runtime['precision']=='fp16')
+            if state and state.get('precision_validated'):
+                scaler.load_state_dict(state['scaler'])
+            store.save(name, snapshot(), push=True)
+            for next_epoch in range(epoch+1, epochs+1):
+                clock.check()
+                if history:
+                    need = EPOCH_SAFETY * max(row['seconds'] for row in history[-3:])
+                    if allowance is not None and clock.elapsed() + need >= allowance:
+                        reason = 'compute_budget'; break
+                    left = clock.remaining()
+                    if left is not None and need >= left:
+                        raise BudgetPause('%s: the next epoch (~%.0f min) does not fit the %.0f min left in this session. '
+                                          'Progress is saved at epoch %d; rerun this notebook to resume.' % (name, need/60, left/60, epoch))
+                started = time.monotonic()
+                lr_used = optimizer.param_groups[0]['lr']
+                if dev.type=='cuda': torch.cuda.reset_peak_memory_stats(dev)
+                model.train()
+                metrics = train_epoch(next_epoch, optimizer, scaler, runtime, clock)
+                model.eval()
+                validation = validate(clock)
+                validation = validation if isinstance(validation, dict) else dict(val_dice=float(validation))
+                score = float(validation['val_dice'])
+                if not np.isfinite(score): raise FloatingPointError('Non-finite validation Dice')
+                scheduler.step(); epoch = next_epoch
+                history.append(dict(epoch=epoch, seconds=time.monotonic()-started,
+                    peak_cuda_bytes=torch.cuda.max_memory_allocated(dev) if dev.type=='cuda' else 0,
+                    lr=lr_used, **metrics, **validation))
+                if score > best_score:
+                    best_score, best_epoch, stale, best = score, epoch, 0, cpu_state(model)
+                else: stale += 1
+                store.save(name, snapshot(), push=epoch % push_every==0)
+                pace = float(np.mean([row['seconds'] for row in history[-3:]]))
+                print(f'[{name}] epoch {epoch}/{epochs}: val Dice={score:.4f} (best {best_score:.4f} @ {best_epoch}, '
+                      f'stale {stale}/{patience}); {history[-1]["seconds"]/60:.1f} min/epoch; '
+                      f'at most {pace*(epochs-epoch)/3600:.1f} h more to the epoch cap', flush=True)
+                if stale>=patience:
+                    reason='early_stopping'; break
+    except PhaseLimit:
+        reason = 'compute_budget'
+    except BudgetPause:
+        # Keep the last completed epoch; never finalize on a session pause.
+        if store.read(name) is not None:
+            store.push(name)
+        raise
     # Read the last completed epoch; never persist a partial optimizer group/epoch.
     saved = store.read(name)
     if saved['best'] is None:
         saved.update(stopping_reason='insufficient_budget_no_validated_epoch', phase_seconds_used=clock.elapsed())
         store.save(name,saved,push=True)
-        raise BudgetPause('No validated epoch fits the declared allowance. Preserve the ZIP; this study is incomplete, not converged.')
+        raise BudgetPause('No validated epoch was completed. Preserve the ZIP and resume; this study is incomplete.')
     saved.update(complete=True, stopping_reason=reason, phase_seconds_limit=allowance,
-                 phase_seconds_used=clock.elapsed(), convergence_demonstrated=False)
+                 phase_seconds_used=clock.elapsed(), training_seconds=clock.elapsed(), sessions=sessions,
+                 epoch_cap=epochs, patience=patience, protocol=protocol,
+                 convergence_demonstrated=reason == 'early_stopping')
     store.save(name,saved,push=True)
     model.load_state_dict(saved['best']); model.eval()
     model.brats_gpu_runtime = saved['runtime']

@@ -21,8 +21,8 @@ def _(mo):
 
     Fresh Part 1 is required. Keep all matching helpers beside the notebook and fill the blank HF token locally.
     15k SLIC, HGT, learned 0–2 extra hops; structural refinement and reconstruction are off.
-    One seed; declared 135-minute model-training allowances, with best completed validation checkpoints.
-    A compute-budget stop is not convergence. See RUN_NEXT.md and ADVISOR_SCOPE.md before running.
+    One seed; convergence protocol v9: no training-time cap, up to 100 epochs per stage, early stopping on validation Dice (patience 15), best-validation checkpoint kept.
+    A session that runs out of time saves its last completed epoch; rerun the same notebook to resume. See RUN_NEXT.md and ADVISOR_SCOPE.md before running.
     Session work stops at 9.5 hours to reserve time for ZIP transfer. Individual operations/transfers are not preemptible.
     """)
     return
@@ -149,10 +149,10 @@ def _():
     REQUIRE_CUDA = True
     GPU_PRECISION = "auto"  # BF16 on supported CUDA GPUs; FP32 on CPU helpers.
     GPU_AUTOTUNE = True
-    GPU_MEMORY_FRACTION = 0.70
+    GPU_MEMORY_FRACTION = 0.85
     VOXEL_EFFECTIVE_BATCH_SIZE = 4
-    VOXEL_MAX_MICROBATCH = 4
-    INFERENCE_MAX_BATCH = 8
+    VOXEL_MAX_MICROBATCH = 16  # whole effective batch in one GPU pass when it fits (same optimizer updates)
+    INFERENCE_MAX_BATCH = 16
     VOXEL_PREFETCH_WORKERS = 2
     from huggingface_hub import get_token as _get_hf_token_early
     if HF_REQUIRED and not ((os.environ.get("HF_TOKEN") or "").strip() or (_get_hf_token_early() or "").strip() or HF_TOKEN_PLACEHOLDER.strip()):
@@ -170,7 +170,7 @@ def _():
             raise RuntimeError("The molab PyTorch/CUDA build cannot execute GPU convolutions; use its CUDA-compatible runtime") from _gpu_error
 
     GRAPH_MAX_MICROBATCH = 8
-    GRAPH_MEMORY_FRACTION = 0.75
+    GRAPH_MEMORY_FRACTION = 0.85
     return (
         BATCH_SIZE,
         CASE_EXCLUSIONS,
@@ -543,7 +543,7 @@ def _(
     RUN_CONFIG = {
         "identity": IDENTITY_CONFIG,
         "train": {
-            "phase_seconds_limit": 8100, "compute_protocol": "practical-v8",
+            "phase_seconds_limit": None, "compute_protocol": "convergence-v9",
             "graph_training_protocol": "practical-v8-patient-mean",
             "epochs": EPOCHS, "batch_size": BATCH_SIZE, "lr": LR, "weight_decay": WEIGHT_DECAY,
             "dice_weight": DICE_WEIGHT, "et_focal_weight": ET_FOCAL_WEIGHT, "focal_gamma": FOCAL_GAMMA,
@@ -551,7 +551,7 @@ def _(
             "lambda_rec": LAMBDA_REC,
         },
         "voxel": {
-            "phase_seconds_limit": 8100, "compute_protocol": "practical-v8",
+            "phase_seconds_limit": None, "compute_protocol": "convergence-v9",
             "gpu_training_protocol": "v4-patient-mean-ce", "effective_batch_size": VOXEL_EFFECTIVE_BATCH_SIZE,
             "precision_policy": GPU_PRECISION,
             "voxel_epochs": VOXEL_EPOCHS, "voxel_lr": VOXEL_LR,
@@ -2581,8 +2581,8 @@ def _(
     from brats_experiments import Deadline as _Deadline, identity as _identity, BudgetPause as _BudgetPause
     from brats_bundles import ZipStore as _ZipStore
     _deadline = _Deadline(TRAIN_BUDGET_HOURS, PART1_START_TIME)
-    _store = _ZipStore(os.path.join(PERSISTENT_BASE,'practical_v8_training',CONFIG_HASH),
-        'stage1_practical_v8/runs/'+CONFIG_HASH+'/'+SPLIT_FINGERPRINT[:16],
+    _store = _ZipStore(os.path.join(PERSISTENT_BASE,'convergence_v9_training',CONFIG_HASH),
+        'stage1_convergence_v9/runs/'+CONFIG_HASH+'/'+SPLIT_FINGERPRINT[:16],
         dict(protocol='practical-v8-patient-mean',config=RUN_CONFIG,split=SPLIT_FINGERPRINT,dataset=DATASET_FINGERPRINT),
         api=hf_api if HF_ENABLED else None,
         download=lambda name,rev:hf_try_download(name,HF_MODEL_REPO_ID,HF_MODEL_REPO_TYPE,revision=rev),
@@ -2615,7 +2615,8 @@ def _(
         return dict(val_dice=float(score),val_total=float(np.mean(values)),val_seg=float(np.mean(values)),
                     val_rec=0.,val_node_proxy=float(np.mean(dices)))
 
-    print('Practical v8: 15k HGT, learned 0..2 hops, no reconstruction/structural module; fixed 135-minute training allowance.')
+    print('Convergence v9: 15k HGT, learned 0..2 hops, no reconstruction/structural module; up to', EPOCHS,
+          'epochs, early stopping (patience', EARLY_STOP_PATIENCE, '), no training-time cap. A paused session resumes when rerun.')
     try:
         _state=_train_phase(_graph_engine.modules,_store,'graph_training.pt',
             _identity(dict(config=RUN_CONFIG,split=SPLIT_FINGERPRINT,dataset=DATASET_FINGERPRINT)),
@@ -2632,7 +2633,8 @@ def _(
     stage1_training_complete=_state['complete']
     GRAPH_GPU_RUNTIME=dict(_state['runtime'],stopping_reason=_state['stopping_reason'],
         phase_seconds_used=_state['phase_seconds_used'],phase_seconds_limit=_state['phase_seconds_limit'],
-        convergence_demonstrated=False)
+        training_seconds=_state.get('training_seconds'),sessions=_state.get('sessions'),
+        convergence_demonstrated=bool(_state.get('convergence_demonstrated')))
     write_json_atomic(os.path.join(PERSISTENT_BASE,'graph_gpu_runtime.json'),GRAPH_GPU_RUNTIME)
     print('Part 1 selected epoch',best_epoch,'after',len(history),'epochs; stop:',_state['stopping_reason'])
     return (

@@ -48,13 +48,112 @@ def load_exact_model(model, base_model, checkpoint, identity, dataset_fingerprin
 
 def make_store(context, key, root=None):
     c=context
-    return ZipStore(root or Path(c['PERSISTENT_BASE'])/'continuation_v8'/key,
+    # Local root is per Part 1 model, so a disk that kept an earlier run never mixes its index with this one.
+    return ZipStore(root or Path(c['PERSISTENT_BASE'])/'continuation_v8'/c['STAGE1_MODEL_SHA256'][:20]/key,
         'continuation_v8/'+c['STAGE1_MODEL_SHA256'][:20]+'/'+key,
         dict(stage1_sha256=c['STAGE1_MODEL_SHA256'],key=key),
         api=c['hf_api'] if c['HF_ENABLED'] else None,
         download=lambda name,rev:c['hf_try_download'](name,c['HF_MODEL_REPO_ID'],c['HF_MODEL_REPO_TYPE'],revision=rev),
         repo_id=c['HF_MODEL_REPO_ID'],repo_type=c['HF_MODEL_REPO_TYPE'],
         interval_seconds=c.get('ZIP_SYNC_MINUTES',120)*60)
+
+
+def discover_main_plan_key(main_store, research_store_factory, rows, seeds, override=None):
+    """Find (not guess) the research store Part 3 trained into, from the Hub catalogs.
+
+    Only small catalog ZIPs are read; no checkpoint is downloaded and no store is
+    created for a key that does not already exist on the Hub.
+    """
+    from brats_protocol import select_main_plan_key
+    api = main_store.api
+    if api is None:
+        raise RuntimeError('Hugging Face is disabled; Part 5 needs the stored Part 3 results. Fill the token and rerun.')
+    if override:
+        return override, {override: 'override supplied; verified against the stored protocol by the runner'}
+    base = main_store.prefix.rsplit('/', 1)[0] + '/research'
+    entries = api.list_repo_tree(repo_id=main_store.repo_id, repo_type=main_store.repo_type,
+                                 path_in_repo=base, revision=main_store.revision)
+    keys = sorted(e.path.rsplit('/', 1)[-1] for e in entries if type(e).__name__ == 'RepoFolder')
+    candidates = {}
+    for key in keys:
+        try:
+            candidates[key] = set(research_store_factory(key).catalog['files'])
+        except RuntimeError as exc:
+            print('[Part 5] skipping research store %s: %s' % (key, exc))
+    key, report = select_main_plan_key(candidates, rows, seeds)
+    print('[Part 5] research stores found on the Hub:')
+    for k, r in sorted(report.items()):
+        print('  %s  trained %d/%d  saved test evaluations %d%s' % (k, r['trained'], r['needed'], r['test_evaluations'], '   <== using this' if k == key else ''))
+    return key, report
+
+
+def open_existing_store(context, prefix, root=None):
+    """Read-only handle on a ZIP store that already exists on the Hub (identity taken from its catalog)."""
+    import tempfile
+    import zipfile
+    c = context
+    api = c['hf_api']
+    revision = api.repo_info(repo_id=c['HF_MODEL_REPO_ID'], repo_type=c['HF_MODEL_REPO_TYPE']).sha
+    source = c['hf_try_download'](prefix + '/catalog.zip', c['HF_MODEL_REPO_ID'], c['HF_MODEL_REPO_TYPE'], revision=revision)
+    if source is None:
+        return None
+    with zipfile.ZipFile(source) as z:
+        identity = json.loads(z.read('catalog.json'))['identity']
+    root = root or Path(tempfile.gettempdir()) / 'brats_readonly_stores' / prefix.replace('/', '_')
+    return ZipStore(root, prefix, identity, api=api,
+        download=lambda name, rev: c['hf_try_download'](name, c['HF_MODEL_REPO_ID'], c['HF_MODEL_REPO_TYPE'], revision=rev),
+        repo_id=c['HF_MODEL_REPO_ID'], repo_type=c['HF_MODEL_REPO_TYPE'], interval_seconds=10**9)
+
+
+def find_pilot_receipt(context, main_store, source_prefix=None):
+    """Part 4's SLIC pilot receipt and a factory for its research store.
+
+    Looks in the current main store first. After Part 1 is retrained the main store
+    moves to a new prefix, so the earlier validation-only pilot (its own declared
+    protocol) is then read, unchanged, from the earlier continuation on the Hub.
+    Returns (receipt, store_factory, source_prefix); (None, None, None) if absent.
+    """
+    receipt = main_store.read('slic_pilot_receipt.json')
+    here = main_store.prefix.rsplit('/', 1)[0]
+    if receipt is not None and source_prefix in (None, here):
+        return receipt, None, here
+    if main_store.api is None:
+        return None, None, None
+    root = here.split('/')[0]
+    if source_prefix:
+        prefixes = [source_prefix.strip('/')]
+    else:
+        entries = main_store.api.list_repo_tree(repo_id=main_store.repo_id, repo_type=main_store.repo_type,
+                                                path_in_repo=root, revision=main_store.revision)
+        prefixes = sorted(e.path for e in entries if type(e).__name__ == 'RepoFolder' and e.path != here)
+    found = []
+    for prefix in prefixes:
+        store = open_existing_store(context, prefix + '/main')
+        value = store.read('slic_pilot_receipt.json') if store is not None else None
+        if value is not None:
+            found.append((prefix, value))
+    complete = [row for row in found if row[1].get('complete')] or found
+    if not complete:
+        return None, None, None
+    if len(complete) > 1:
+        raise RuntimeError('Several earlier SLIC pilot receipts exist (%s); set PILOT_SOURCE_PREFIX to choose one.'
+                           % ', '.join(p for p, _ in complete))
+    prefix, receipt = complete[0]
+    print('[Part 5] Using the SLIC pilot receipt carried over from', prefix, '(validation-only pilot, unchanged).')
+    return receipt, (lambda key: open_existing_store(context, prefix + '/research/' + key)), prefix
+
+
+def describe_pilot_receipt(main_store, receipt=None):
+    """Part 4's receipt. Absent/incomplete is disclosed, never fatal."""
+    receipt = main_store.read('slic_pilot_receipt.json') if receipt is None else receipt
+    if receipt is None:
+        print('[Part 5] No SLIC pilot receipt found; the report will say the pilot was not supplied. Run Part 4 first if you need it.')
+    else:
+        print('[Part 5] SLIC pilot receipt: plan=%s complete=%s jobs=%s' % (receipt.get('plan'), receipt.get('complete'),
+              [j.get('experiment') for j in receipt.get('status', {}).get('finished_jobs', [])]))
+        if not receipt.get('complete'):
+            print('[Part 5] WARNING: pilot incomplete; it cannot support a SLIC-resolution claim.')
+    return receipt
 
 
 def require_main_complete(store, name):

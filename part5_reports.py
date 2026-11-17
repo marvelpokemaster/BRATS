@@ -5,6 +5,7 @@
 #     "nibabel==5.4.2",
 #     "torch-geometric==2.8.0.post1",
 #     "huggingface-hub==1.32.0",
+#     "monai==1.5.1",
 # ]
 # ///
 
@@ -21,8 +22,8 @@ def _(mo):
 
     Fresh Part 1 is required. Keep all matching helpers beside the notebook and fill the blank HF token locally.
     15k SLIC, HGT, learned 0–2 extra hops; structural refinement and reconstruction are off.
-    One seed; declared 135-minute model-training allowances, with best completed validation checkpoints.
-    A compute-budget stop is not convergence. See RUN_NEXT.md and ADVISOR_SCOPE.md before running.
+    One seed; convergence protocol v9: no training-time cap, up to 100 epochs per stage, early stopping on validation Dice (patience 15), best-validation checkpoint kept.
+    A session that runs out of time saves its last completed epoch; rerun the same notebook to resume. See RUN_NEXT.md and ADVISOR_SCOPE.md before running.
     Session work stops at 9.5 hours to reserve time for ZIP transfer. Individual operations/transfers are not preemptible.
     """)
     return
@@ -155,10 +156,10 @@ def _():
     REQUIRE_CUDA = True
     GPU_PRECISION = "auto"  # BF16 on supported CUDA GPUs; FP32 on CPU helpers.
     GPU_AUTOTUNE = True
-    GPU_MEMORY_FRACTION = 0.70
+    GPU_MEMORY_FRACTION = 0.85
     VOXEL_EFFECTIVE_BATCH_SIZE = 16
-    VOXEL_MAX_MICROBATCH = 4
-    INFERENCE_MAX_BATCH = 8
+    VOXEL_MAX_MICROBATCH = 16  # whole effective batch in one GPU pass when it fits (same optimizer updates)
+    INFERENCE_MAX_BATCH = 16
     VOXEL_PREFETCH_WORKERS = 12
     from huggingface_hub import get_token as _get_hf_token_early
     if HF_REQUIRED and not ((os.environ.get("HF_TOKEN") or "").strip() or (_get_hf_token_early() or "").strip() or HF_TOKEN_PLACEHOLDER.strip()):
@@ -221,7 +222,7 @@ def _():
     SEED = stage1_checkpoint["run_config"]["identity"]["seed"]
 
     GRAPH_MAX_MICROBATCH = 8
-    GRAPH_MEMORY_FRACTION = 0.75
+    GRAPH_MEMORY_FRACTION = 0.85
 
     import monai as _monai  # Required here and again in a fresh Part 5 session; tested with MONAI 1.5.1.
 
@@ -601,7 +602,7 @@ def _(
     RUN_CONFIG = {
         "identity": IDENTITY_CONFIG,
         "train": {
-            "phase_seconds_limit": 8100, "compute_protocol": "practical-v8",
+            "phase_seconds_limit": None, "compute_protocol": "convergence-v9",
             "graph_training_protocol": "practical-v8-patient-mean",
             "epochs": EPOCHS, "batch_size": BATCH_SIZE, "lr": LR, "weight_decay": WEIGHT_DECAY,
             "dice_weight": DICE_WEIGHT, "et_focal_weight": ET_FOCAL_WEIGHT, "focal_gamma": FOCAL_GAMMA,
@@ -609,7 +610,7 @@ def _(
             "lambda_rec": LAMBDA_REC,
         },
         "voxel": {
-            "phase_seconds_limit": 8100, "compute_protocol": "practical-v8",
+            "phase_seconds_limit": None, "compute_protocol": "convergence-v9",
             "gpu_training_protocol": "v4-patient-mean-ce", "effective_batch_size": VOXEL_EFFECTIVE_BATCH_SIZE,
             "precision_policy": GPU_PRECISION,
             "voxel_epochs": VOXEL_EPOCHS, "voxel_lr": VOXEL_LR,
@@ -1989,7 +1990,7 @@ def _(
         dice = (2.0 * inter + eps) / (den + eps)             # [3, num_graphs]
         return dice.mean(dim=0)                               # per patient
 
-    return focal_loss_soft, region_dice_loss, soft_cross_entropy
+    return focal_loss_soft, node_region_dice, region_dice_loss, soft_cross_entropy
 
 
 @app.cell
@@ -2322,6 +2323,7 @@ def _(
     VOXEL_PREFETCH_WORKERS,
     VoxelRefinementHead,
     WEIGHT_DECAY,
+    ZIP_CONTEXT,
     build_and_save,
     class_weights,
     device,
@@ -2333,6 +2335,7 @@ def _(
     load_meta,
     mask_hetero_graph,
     mo,
+    node_region_dice,
     postprocess_prediction_auto,
     project_node_probs,
     rec_lambda,
@@ -2360,6 +2363,13 @@ def _(
     RESEARCH_MODE = "test"
     RESEARCH_JOBS = ()
     RESEARCH_PIPELINE_SHA256 = "b5ba00ce35682e2bc574e22ceec967be0d99c5bed21bb1993b4ef11c9a6c20d2"
+    from brats_workflow import discover_main_plan_key, describe_pilot_receipt, find_pilot_receipt
+    MAIN_PLAN_KEY_OVERRIDE = None  # Normally leave None: Part 5 finds the store that holds the six trained rows.
+    MAIN_PLAN_KEY, _plan_report = discover_main_plan_key(MAIN_STORE, research_store_factory, RESEARCH_PLAN_NAMES, RESEARCH_SEEDS, MAIN_PLAN_KEY_OVERRIDE)
+    # After Part 1 is retrained the main store moves; the earlier validation-only SLIC pilot is carried over unchanged.
+    PILOT_SOURCE_PREFIX_OVERRIDE = None  # e.g. "continuation_v8/670ec244f0e27740def0" to choose an earlier Part 4 pilot explicitly
+    PILOT_RECEIPT, PILOT_STORE_FACTORY, PILOT_SOURCE_PREFIX = find_pilot_receipt(ZIP_CONTEXT, MAIN_STORE, PILOT_SOURCE_PREFIX_OVERRIDE)
+    describe_pilot_receipt(MAIN_STORE, PILOT_RECEIPT)
     from brats_experiments import run_research, experiment_plan, ResearchRunner, BudgetPause
     RESEARCH_AVAILABLE_ROWS = experiment_plan(N_SEGMENTS, HOPS, K_MAX, USE_MASKED_RECONSTRUCTION)
     print("Available research jobs:", [row["name"] for row in RESEARCH_AVAILABLE_ROWS])
@@ -2427,6 +2437,7 @@ def _(
         STRUCTURAL_AUX_WEIGHT=STRUCTURAL_AUX_WEIGHT,
         HOP_REG_WEIGHT=HOP_REG_WEIGHT,
         load_meta=load_meta,
+        node_region_dice=node_region_dice,
         postprocess_prediction_auto=postprocess_prediction_auto,
         project_node_probs=project_node_probs,
         LR=LR,
@@ -2460,7 +2471,8 @@ def _(
 
     RESEARCH_SETTINGS = dict(mode=RESEARCH_MODE,seeds=RESEARCH_SEEDS,plan_names=RESEARCH_PLAN_NAMES,
         jobs=RESEARCH_JOBS,active_seeds=RESEARCH_ACTIVE_SEEDS,max_cases_per_split=RESEARCH_MAX_CASES_PER_SPLIT,
-        budget_hours=RESEARCH_BUDGET_HOURS,session_start=PART2_START_TIME)
+        budget_hours=RESEARCH_BUDGET_HOURS,session_start=PART2_START_TIME,
+        adopt_plan_key=MAIN_PLAN_KEY)  # discovered above; the runner verifies it against the stored protocol.json
     research_status = run_research(RESEARCH_CONTEXT,RESEARCH_SETTINGS)
     print(research_status)
     mo.stop(research_status.get("paused") or not research_status.get("report_ready"),
@@ -2468,6 +2480,9 @@ def _(
     RESEARCH_REPORT_READY = True
     return (
         BudgetPause,
+        PILOT_RECEIPT,
+        PILOT_SOURCE_PREFIX,
+        PILOT_STORE_FACTORY,
         RESEARCH_CONTEXT,
         RESEARCH_REPORT_READY,
         research_status,
@@ -3059,6 +3074,9 @@ def _(
     MAIN_STAGE2_STATE,
     MAIN_STORE,
     PERSISTENT_BASE,
+    PILOT_RECEIPT,
+    PILOT_SOURCE_PREFIX,
+    PILOT_STORE_FACTORY,
     RESEARCH_CONTEXT,
     SEED,
     SESSION_DEADLINE,
@@ -3087,7 +3105,8 @@ def _(
         stage1_checkpoint=stage1_checkpoint,MAIN_STAGE2_STATE=MAIN_STAGE2_STATE,
         forward_model=forward_model, mask_hetero_graph=mask_hetero_graph,reconstruction_loss=reconstruction_loss,
         REC_VAL_SEED=SEED+1234,STAGE1_MODEL_SHA256=STAGE1_MODEL_SHA256,
-        rec_recover_case=rec_recover_case,RESEARCH_STUDY_KEY=research_status["plan"],MAIN_STORE=MAIN_STORE)
+        rec_recover_case=rec_recover_case,RESEARCH_STUDY_KEY=research_status["plan"],MAIN_STORE=MAIN_STORE,
+        PILOT_RECEIPT=PILOT_RECEIPT,PILOT_STORE_FACTORY=PILOT_STORE_FACTORY,PILOT_SOURCE_PREFIX=PILOT_SOURCE_PREFIX)
     advisor_report_status = run_advisor_reports(REPORT_CONTEXT,make_store(ZIP_CONTEXT,"advisor_reports"))
     print(advisor_report_status)
     return

@@ -1,0 +1,5 @@
+1. Does the typed heterogeneous graph consistently outperform a simpler homogeneous graph when the same CNN refinement network is used?
+2. Can you demonstrate which incorrect CNN predictions are corrected because of graph-based relationships, particularly in enhancing tumour regions?
+3. Do the edge gates, Shapley attributions and adaptive-hop values provide faithful explanations, or do they only produce visually plausible interpretations?[a. Edge perturbation test: Compare the effect of removing high-gate versus low-gate edges on tumour predictions, with matched perturbation budgets.
+b. Modality intervention test: Evaluate whether Shapley importance rankings agree with prediction changes under realistic modality perturbations.
+c. Hop sensitivity test: Compare predictions when information from different graph distances is restricted or perturbed.]

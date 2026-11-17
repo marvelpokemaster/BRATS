@@ -315,6 +315,9 @@ class GraphBatchEngine:
         return runtime
 
 
+PART1_FINAL_PREFIX = 'stage1_convergence_v9/final'   # v9 namespace; the v8 handoff under stage1_practical_v8/ is left untouched
+
+
 def publish_part1_bundle(root, repo_id, repo_type, api, download, checkpoint_path,
                          checkpoint_name, manifest_name, checksum, manifest):
     """One ZIP commit containing the completed checkpoint and its manifest."""
@@ -322,7 +325,7 @@ def publish_part1_bundle(root, repo_id, repo_type, api, download, checkpoint_pat
     from brats_bundles import ZipStore
     from brats_transfer import write_json_atomic
     root = Path(root)
-    store = ZipStore(root/'practical_v8_final', 'stage1_practical_v8/final',
+    store = ZipStore(root/'convergence_v9_final', PART1_FINAL_PREFIX,
                      dict(protocol=GRAPH_TRAINING_PROTOCOL), api=api, download=download,
                      repo_id=repo_id, repo_type=repo_type, interval_seconds=7200)
     value = dict(manifest, sha256=checksum, size_bytes=Path(checkpoint_path).stat().st_size,
@@ -352,13 +355,13 @@ def load_part1_bundle(token, repo_id, repo_type='model'):
             return hf_hub_download(repo_id=repo_id,repo_type=repo_type,filename=name,revision=revision,token=token)
         except EntryNotFoundError:
             return None
-    store = ZipStore(Path(tempfile.gettempdir())/'brats_practical_v8_input'/repo_id.replace('/','_'),
-        'stage1_practical_v8/final',dict(protocol=GRAPH_TRAINING_PROTOCOL),
+    store = ZipStore(Path(tempfile.gettempdir())/'brats_convergence_v9_input'/repo_id.replace('/','_'),
+        PART1_FINAL_PREFIX,dict(protocol=GRAPH_TRAINING_PROTOCOL),
         api=api,download=download,repo_id=repo_id,repo_type=repo_type)
     name = 'stage1_graph_model.manifest.json'
     manifest = store.read(name)
     if manifest is None:
-        raise RuntimeError('Finish practical-v8 Part 1 and its final ZIP handoff before running Parts 2–5.')
+        raise RuntimeError('Finish convergence-v9 Part 1 and its final ZIP handoff (%s) before running Parts 2–5.' % PART1_FINAL_PREFIX)
     checkpoint_name = name.replace('.manifest.json','.pt')
     path = store.pull(checkpoint_name)
     if path is None or sha256_path(path) != manifest['sha256']:

@@ -1,10 +1,10 @@
 {
-  "version": "practical-v8",
+  "version": "convergence-v9",
   "source_commit": "fa685319ced00fdfc9c48e263ea8e3e39b64caba",
-  "target_sessions": 5,
+  "target_sessions": "as many as the epoch counts need; each part resumes when rerun",
   "session_limit_hours": 12,
   "work_deadline_hours": 9.5,
-  "main_phase_seconds": 8100,
+  "main_phase_seconds": null,
   "pilot_phase_seconds": 2700,
   "main_seeds": [
     42
@@ -19,5 +19,11 @@
   "real_gpu_training": false,
   "live_hub_writes": false,
   "journal_readiness_certified": false,
-  "source_checkout_modified": false
+  "source_checkout_modified": true,
+  "main_epoch_cap": {
+    "graph": 100,
+    "voxel": 100
+  },
+  "main_patience": 15,
+  "stopping": "epoch cap + early stopping on validation Dice; best-validation checkpoint; sessions pause and resume"
 }

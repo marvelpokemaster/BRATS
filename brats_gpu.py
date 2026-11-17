@@ -39,6 +39,17 @@ def bounded_prefetch(iterable, prepare=lambda x: x, workers=1, depth=2):
                 future.cancel()
 
 
+def ordered_results(pool, jobs, limit):
+    """Submit (fn, *args) jobs to a thread pool, keep at most `limit` pending, return results in order."""
+    pending, results = deque(), []
+    for job in jobs:
+        pending.append(pool.submit(*job))
+        while len(pending) > limit:
+            results.append(pending.popleft().result())
+    results.extend(future.result() for future in pending)
+    return results
+
+
 def patient_groups(iterable, size=4):
     if size < 1:
         raise ValueError("Effective batch size must be positive")
@@ -169,7 +180,7 @@ def configure_gpu(head, x, y=None, loss_fn=None, *, roi=128, precision="auto",
             with preserved_probe_state(head):
                 for key, maximum, training in modes:
                     records = []
-                    sizes = [size for size in (1, 2, 4, 8) if size <= maximum]
+                    sizes = [size for size in (1, 2, 4, 8, 16) if size <= maximum]
                     for size in sizes:
                         try:
                             record = _probe(head, probe_x, probe_y, loss_fn, size, result["precision"], training)
@@ -244,19 +255,24 @@ def patient_dice_tensor(logits, targets):
     return torch.stack(values).mean(0)
 
 
-def _backward_group(head, group, loss_fn, scaler, runtime):
+def _stack_pairs(examples, dev):
+    return _batch_to_device([v[0] for v in examples], dev), _batch_to_device([v[1] for v in examples], dev).long()
+
+
+def _backward_group(head, group, loss_fn, scaler, runtime, materialize=None):
     import torch
+    from brats_protocol import example_shape
     dev = next(head.parameters()).device
+    materialize = materialize or _stack_pairs
     losses, dices = [], []
     start = 0
     while start < len(group):
         size = min(runtime["microbatch"], len(group) - start)
         # Unequal shapes are processed separately; no artificial BG padding.
-        while size > 1 and any(group[start + k][0].shape != group[start][0].shape for k in range(1, size)):
+        while size > 1 and any(example_shape(group[start + k]) != example_shape(group[start]) for k in range(1, size)):
             size -= 1
         examples = group[start:start + size]
-        x = _batch_to_device([v[0] for v in examples], dev)
-        y = _batch_to_device([v[1] for v in examples], dev).long()
+        x, y = materialize(examples, dev)
         with amp_context(runtime, dev):
             output = head(x)
             logits = output[0] if isinstance(output, (tuple, list)) else output
@@ -270,8 +286,12 @@ def _backward_group(head, group, loss_fn, scaler, runtime):
     return float(torch.stack(losses).sum().cpu()) / len(group), torch.cat(dices).cpu().tolist()
 
 
-def train_patient_group(head, group, optimizer, scaler, loss_fn, runtime):
-    """One update for a fixed group. CUDA OOM retries the SAME examples."""
+def train_patient_group(head, group, optimizer, scaler, loss_fn, runtime, materialize=None):
+    """One update for a fixed group. CUDA OOM retries the SAME examples.
+
+    materialize(examples, device) -> (x, y) builds the device batch; the default
+    stacks (x, y) tensor pairs, brats_protocol.materialize_examples expands compact
+    patch examples (MRI window + graph prior projected on the device)."""
     import torch
     dev = next(head.parameters()).device
     rng = torch.get_rng_state()
@@ -280,7 +300,7 @@ def train_patient_group(head, group, optimizer, scaler, loss_fn, runtime):
         optimizer.zero_grad(set_to_none=True)
         head.train()
         try:
-            loss, dices = _backward_group(head, group, loss_fn, scaler, runtime)
+            loss, dices = _backward_group(head, group, loss_fn, scaler, runtime, materialize)
             break
         except torch.cuda.OutOfMemoryError:
             optimizer.zero_grad(set_to_none=True)

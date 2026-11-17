@@ -1,49 +1,76 @@
-# Run practical v8 in five sessions
+# Run convergence protocol v9 (retrain all six rows)
 
-Extract this whole folder. Use the `.py` marimo entry point OR its matching
-`.ipynb`, with all helpers alongside it. Keep a copy of the original ZIP.
-Start fresh Part 1, fill `HF_TOKEN_PLACEHOLDER` locally, and use the configured
-graph-cache/model repository IDs consistently in every part. Do not mix v7 files.
+v9 replaces the 135-minute training allowance. Every main row now trains to an
+epoch cap with early stopping on validation Dice and keeps the best-validation
+checkpoint. Nothing stops training because of a time budget.
 
-| Session | Notebook | Scheduled work | Declared training allowance |
+| Setting | Graph stage | CNN stage |
+|---|---|---|
+| Epoch cap | 100 | 100 |
+| Early stopping | patience 15 on full-volume validation Dice | patience 15 |
+| Checkpoint kept | best validation mean WT/TC/ET Dice | same |
+| Training-time cap | none | none |
+
+Recorded `stopping_reason` is `early_stopping` or `epoch_cap` only. `compute_budget`
+now exists only for the separate SLIC pilot (Part 4), which keeps its declared
+45-minute allowance and is carried over unchanged.
+
+## Sessions pause and resume
+
+Molab sessions still end. Each part saves after every completed epoch (pushed to
+the Hub every 5 epochs and on pause). Before starting an epoch it checks whether
+that epoch fits in the session's remaining 9.5-hour work budget; if not, it stops
+with a message that says so. **Rerun the same notebook in a new session and it
+resumes from the last completed epoch**, with the same optimizer, scheduler and
+RNG state. A pause never marks training complete.
+
+Every epoch prints its duration and the most time left to the epoch cap, so you
+can see how many sessions a part needs.
+
+## Order
+
+| Step | Notebook | Trains | Rerun until it prints |
 |---|---|---|---|
-| 1 | part1_corrected | Audit/reuse 15k graphs; main HGT with learned 0–2 hops; handoff | One phase, 135 min |
-| 2 | part2_refinement | Main hybrid CNN and matched MRI-only CNN | Two phases, 270 min total |
-| 3 | part3_experiments | GraphSAGE, fixed shared two-hop HGT, independent SegResNet | Three phases, 405 min total |
-| 4 | part4_slic_study | Separate 64-train/16-validation SLIC pilot at four resolutions | Four phases, at most 180 min total, plus fresh graph builds |
-| 5 | part5_reports | Main held-out evaluation, metrics, plots and graph explanations | No new training |
+| 0 | `preflight_v9` | nothing (tests, ~2 min) | `PREFLIGHT PASSED` |
+| 1 | `part1_corrected` | main HGT graph stage (`full`, `no_voxel` share it) | `Part1 handoff ready` |
+| 2 | `part2_refinement` | `full` CNN stage, `cnn_only` | `PART 2 COMPLETE` |
+| 3 | `part3_experiments` | `graphsage_backbone`, `fixed_shared_hops`, `segresnet` | `THIS PART COMPLETE` |
+| 4 | (skip) | the SLIC pilot from v8 is reused as-is | |
+| 5 | `part5_reports` | nothing; held-out test evaluation, XAI, reports | final export receipt |
 
-The remaining time is for downloads, graph preparation, validation/report work
-outside training phases and uploads. Training phases include their own validation,
-calibration and prior preparation. These allocations are not predicted runtimes.
-Every session has a 9.5-hour work deadline, with the final 2.5 hours reserved for
-transfer. A slow data build or transfer is still possible; the code cannot enforce
-the platform's hard limit inside a single blocking call.
+Keep `monai==1.5.1` installed for Parts 3 and 5. Fill `HF_TOKEN_PLACEHOLDER` locally
+and clear it before exporting any notebook to HTML.
 
-1. Part 1: leave `N_SEGMENTS=15000`, `K_MAX=2`, `BATCH_SIZE=8`, physical-batch cap
-   8, structural refinement OFF and reconstruction OFF. Calibration can select
-   less than eight. Wait for the verified final Part 1 ZIP handoff before Part 2.
-2. Part 2: keep the same settings/token. It selects the hybrid model and trains
-   the CNN-only control with the same voxel loss/architecture and phase allowance.
-   Continue only after `PART 2 COMPLETE` and successful ZIP synchronization.
-3. Part 3: ensure `monai==1.5.1` is installed. Keep `RUN_ABLATIONS=True` and the
-   frozen single-seed plan. Continue after `THIS PART COMPLETE` and verified ZIPs.
-4. Part 4: this session needs raw MRI to build its small, frozen pilot. It retrains
-   all four graph resolutions, including 15k. Read the printed `SLIC pilot`
-   receipt: `complete=True` means all pilot validation results exist. An incomplete
-   receipt is preserved and disclosed in Part 5; it cannot support a SLIC claim.
-5. Part 5: ensure `monai==1.5.1` is also installed in this fresh session. It evaluates the six completed main rows on the saved full test split,
-   then adds Shapley/hop/gate diagnostics and the separate pilot results. It will
-   not silently test missing/untrained main baselines. Read the final status and
-   follow the printed `continuation_v8/.../final_reports.zip` location.
+## What is reused from the Hub
 
-Read `stopping_reason`, completed epochs and curves for every model. `compute_budget`
-means training ended because of the declared allowance, not because it converged.
-Low-quality or still-improving curves must be reported as limitations. This plan
-does not promise publishable scores from 135 minutes of training.
+* The audited 15k graph cache (keyed by graph identity; unchanged).
+* The v8 SLIC pilot receipt and its research store under
+  `continuation_v8/670ec244f0e27740def0/` (Part 5 finds it automatically; set
+  `PILOT_SOURCE_PREFIX_OVERRIDE` to choose explicitly).
 
-Do not tune on test results or spend extra sessions without declaring a revised
-budget/protocol. If a required stage cannot produce a completed checkpoint in its
-allowance, preserve the ZIP and inspect the recorded timings before deciding what
-to change. Resume support is for recovery; repeated sessions are not the default
-completion strategy for this five-session plan.
+## What is new on the Hub
+
+* Part 1 trains under `stage1_convergence_v9/runs/...` and publishes its handoff
+  to `stage1_convergence_v9/final`. The v8 handoff under `stage1_practical_v8/`
+  is left untouched and is no longer read by Parts 2-5.
+* Parts 2-5 write to `continuation_v8/<new Part 1 model sha>/...`, a new folder.
+
+## GPU use
+
+The CNN stage now projects graph priors to voxels, accumulates sliding-window
+probabilities and takes the arg-max on the GPU (same arithmetic as before; see
+`test_gpu_equivalence.py`). The effective batch of 16 patches can run in one
+GPU pass (`VOXEL_MAX_MICROBATCH = 16`), inference batches up to 16 windows, and
+calibration may use up to 85% of free VRAM. The number of optimizer updates per
+epoch is unchanged. Validation post-processing and Dice run in CPU threads while
+the GPU moves on to the next patient.
+
+## Reading results
+
+Read `stopping_reason`, the best epoch and the four curves for every model:
+train/validation loss and train/validation Dice (graph stage: `train_loss`,
+`val_total`, `train_node_proxy`, `val_dice`; CNN stage: `train_loss`, `val_loss`,
+`train_patch_dice`, `val_dice`). `epoch_cap` means validation Dice was still
+improving within the last 15 epochs at epoch 100; report it as such.
+
+Do not tune on test results. Single-seed limitations still apply.

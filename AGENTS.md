@@ -32,3 +32,12 @@ To prevent the GPU from idling and to speed up the massive baseline/ablation wor
 * `UNET_BATCH_SIZE = 4`
 * `VOXEL_PREFETCH_WORKERS = 12`
 * `RESEARCH_MAX_CASES_PER_SPLIT = 300` (Restricts the 14 ablation experiments to a 300-patient subset to cut computation time from days to hours).
+
+## 5. Convergence Protocol v9 (Do Not Revert)
+* **No training-time cap**: `brats_practical.train_phase` trains to the epoch cap (100 graph, 100 CNN) with early stopping (patience 15) and keeps the best-validation checkpoint. `stopping_reason` is `early_stopping` or `epoch_cap`; `convergence_demonstrated` is true only for `early_stopping`. The SLIC pilot keeps its 45-minute allowance (`PILOT_SECONDS`).
+* **Session pauses resume**: a session deadline (`BudgetPause`) saves the last completed epoch and re-raises; it never finalizes a phase. Rerunning the same notebook resumes with optimizer/scheduler/RNG state. Covered by `test_convergence_protocol.py`.
+* **v9 Hub namespace**: Part 1 trains in `stage1_convergence_v9/runs/...` and publishes to `stage1_convergence_v9/final` (`brats_graph.PART1_FINAL_PREFIX`). The v8 handoff (`stage1_practical_v8/`) is left intact. Local continuation stores are rooted per Part 1 model sha.
+* **GPU data path**: CNN training sends compact patches (float16 MRI window, labels, node maps, node probabilities) and `brats_protocol.materialize_examples` builds the batch on the device; `sliding_window_predict` is device-resident. Both must stay bit-identical to `make_training_patch` / `sliding_window_predict_reference` (`test_gpu_equivalence.py`). `VOXEL_MAX_MICROBATCH = 16`, `INFERENCE_MAX_BATCH = 16`, memory fractions 0.85.
+* **Curves**: research graph rows log `train_loss`, `train_node_proxy`, `val_total`, `val_node_proxy`, `val_dice`, matching Part 1.
+* **SLIC pilot carry-over**: Part 5 reads the v8 pilot receipt from the earlier continuation (`brats_workflow.find_pilot_receipt`) when the new main store has none.
+* **Marimo rules for any notebook edit**: names starting with `_` are private to their cell; every other global may be defined in exactly one cell; cross-cell names must be cell parameters and returned by the defining cell. `.ipynb` twins use 0-space indentation; run `tools/check_notebook_parity.py` after edits.

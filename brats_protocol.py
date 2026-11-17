@@ -15,6 +15,62 @@ MODALITY_ORDER = ("t1", "t1ce", "t2", "flair")
 CASE_ID_PATTERN = re.compile(r"BraTS2021_\d+", re.IGNORECASE)
 
 
+def adopt_recorded_plan(stored, current, adopted_key, identity, allowed_source_changes):
+    """Verify that a held-out evaluation may reuse a plan recorded at training time.
+
+    The research plan key hashes the helper-source files. A later bug fix therefore
+    moves the evaluation onto a new, empty store and the trained rows look missing.
+    Adoption is accepted only if (a) the stored protocol hashes to the requested key,
+    (b) every manifest field except ``source_hashes`` is identical, and (c) the only
+    source files that differ are explicitly allowed. Returns (manifest, amendment).
+    """
+    if not isinstance(stored, dict):
+        raise RuntimeError("Cannot adopt plan %s: its protocol.json is missing from the store" % adopted_key)
+    if identity(stored)[:20] != adopted_key:
+        raise RuntimeError("Stored protocol does not hash to plan %s; refusing to adopt" % adopted_key)
+    fields = (set(stored) | set(current)) - {"source_hashes"}
+    different = sorted(k for k in fields if identity({"v": stored.get(k)}) != identity({"v": current.get(k)}))
+    if different:
+        raise RuntimeError("Running configuration differs from plan %s in: %s" % (adopted_key, ", ".join(different)))
+    old, new = stored.get("source_hashes", {}), current.get("source_hashes", {})
+    changed = sorted(n for n in set(old) | set(new) if old.get(n) != new.get(n))
+    unexpected = [n for n in changed if n not in allowed_source_changes]
+    if unexpected:
+        raise RuntimeError("Unexpected source change(s) since training: " + ", ".join(unexpected))
+    amendment = dict(adopted_key=adopted_key, recomputed_key=identity(current)[:20],
+                     changed_sources={n: dict(recorded=old.get(n), running=new.get(n)) for n in changed},
+                     scope="held-out evaluation only; no retraining")
+    return stored, amendment
+
+
+def select_main_plan_key(candidates, rows, seeds):
+    """Pick the research store that holds the trained main rows.
+
+    ``candidates`` maps a plan key to the set of file names in that store's catalog.
+    A store qualifies only if every ``runs/<row>/seed_<seed>/trained.json`` exists.
+    Several qualifying stores are ranked by the number of saved held-out test
+    evaluations, and a tie is refused rather than guessed. Returns (key, report).
+    """
+    needed = {"runs/%s/seed_%s/trained.json" % (row, seed) for row in rows for seed in seeds}
+    report = {}
+    for key, names in candidates.items():
+        names = set(names)
+        report[key] = dict(trained=len(needed & names), needed=len(needed),
+                           test_evaluations=sum(1 for n in names if n.startswith("evaluation/test/")),
+                           missing=sorted(needed - names))
+    complete = sorted(k for k, r in report.items() if r["trained"] == r["needed"])
+    if not complete:
+        best = sorted(report.items(), key=lambda kv: -kv[1]["trained"])[:3]
+        raise RuntimeError("No research store holds all %d trained main rows. Closest: %s. Re-run Part 3 (training) "
+                           "before Part 5." % (len(needed), "; ".join("%s has %d (missing %s)" % (k, r["trained"], ", ".join(r["missing"][:3])) for k, r in best) or "none found"))
+    top = max(report[k]["test_evaluations"] for k in complete)
+    leaders = [k for k in complete if report[k]["test_evaluations"] == top]
+    if len(leaders) > 1:
+        raise RuntimeError("Several research stores hold all trained main rows (%s) and none is ahead on saved test evaluations; "
+                           "set MAIN_PLAN_KEY_OVERRIDE to the intended one." % ", ".join(leaders))
+    return leaders[0], report
+
+
 def case_id_from_path(path):
     """Canonical BraTS2021 ID parsed from the NIfTI filename, never the folder."""
     match = CASE_ID_PATTERN.search(Path(path).name)
@@ -136,8 +192,101 @@ def restore_full_prediction(pred_crop, meta):
     return pred
 
 
+def project_probabilities_torch(maps, probs, num_classes=4):
+    """GPU/torch twin of probability_window over whole tensors (same float32 arithmetic).
+
+    maps: per-node-type integer tensors (-1 = no node); probs: per-type float32 (nodes, classes),
+    both in the iteration order of the node_probs dict. Returns (classes, *shape) float32.
+    """
+    import torch
+    shape = tuple(maps[0].shape)
+    dev = maps[0].device
+    acc = torch.zeros(shape + (num_classes,), dtype=torch.float32, device=dev)
+    count = torch.zeros(shape, dtype=torch.float32, device=dev)
+    for node_map, values in zip(maps, probs):
+        valid = node_map >= 0
+        acc[valid] += values.to(device=dev, dtype=torch.float32)[node_map[valid].long()]
+        count[valid] += 1
+    valid = count > 0
+    acc[valid] /= count[valid].unsqueeze(-1)
+    acc[~valid, 0] = 1.
+    return acc.permute(3, 0, 1, 2)
+
+
+def _pad_min4(tensor):
+    import torch.nn.functional as F
+    pad = [v for n in reversed(tuple(tensor.shape[-3:])) for v in (0, max(0, 4 - int(n)))]
+    return F.pad(tensor, pad) if any(pad) else tensor
+
+
 def sliding_window_predict(head, meta, node_probs=None, roi=128, overlap=.25):
-    """Predict every MRI-brain voxel. Does not access meta['seg'] or labels."""
+    """Predict every MRI-brain voxel. Does not access meta['seg'] or labels.
+
+    GPU-resident version: the four MRI channels and graph priors are moved to the
+    device once per case, the prior is projected on the device, and the overlapping
+    window probabilities are accumulated and arg-maxed there. Windows, padding,
+    softmax, accumulation order and tie-breaking match sliding_window_predict_reference.
+    """
+    import torch
+    from brats_gpu import configure_gpu, amp_context, _cleanup_cuda
+    shape = tuple(meta["crop_shape"])
+    dev = next(head.parameters()).device
+    head.eval()
+    bounds = window_bounds(shape, roi, overlap)
+    pin = dev.type == "cuda"
+    def to_dev(array):
+        tensor = torch.from_numpy(np.ascontiguousarray(array))
+        return (tensor.pin_memory() if pin else tensor).to(dev, non_blocking=pin)
+    volume = to_dev(np.stack([np.asarray(meta["vis"][m]) for m in MODALITY_ORDER])).float()
+    if node_probs is not None:
+        prior = project_probabilities_torch([to_dev(np.asarray(meta["node_map"][nt])) for nt in node_probs],
+                                            [to_dev(np.asarray(p, dtype=np.float32)) for p in node_probs.values()])
+        volume = torch.cat((volume, prior), 0)
+        del prior
+    def window(bound):
+        slices = tuple(slice(l, h) for l, h in zip(*bound))
+        return _pad_min4(volume[(slice(None),) + slices]), slices
+    runtime = getattr(head, "brats_gpu_runtime", None)
+    if runtime is None:
+        first, _ = window(bounds[0])
+        options = getattr(head, "brats_gpu_options", {})
+        runtime = configure_gpu(head, first.cpu().numpy(), roi=roi, **options)
+    sums = torch.zeros((4,) + shape, dtype=torch.float32, device=dev)
+    count = torch.zeros(shape, dtype=torch.float32, device=dev)
+    cursor = 0
+    while cursor < len(bounds):
+        size = min(runtime["inference_batch"], len(bounds) - cursor)
+        chunk = [window(b) for b in bounds[cursor:cursor + size]]
+        try:
+            with torch.no_grad(), amp_context(runtime, dev):
+                output = head(torch.stack([w for w, _ in chunk]))
+                logits = output[0] if isinstance(output, (tuple, list)) else output
+                probabilities = logits.float().softmax(1)
+            if not torch.isfinite(probabilities).all():
+                raise FloatingPointError("Non-finite inference probabilities")
+        except torch.cuda.OutOfMemoryError:
+            del chunk
+            _cleanup_cuda()
+            if size == 1:
+                raise
+            runtime["inference_batch"] = max(1, size // 2)
+            print("[GPU] Inference OOM: reducing window batch to", runtime["inference_batch"])
+            continue
+        for probability, (_, slices) in zip(probabilities, chunk):
+            extent = tuple(s.stop - s.start for s in slices)
+            sums[(slice(None),) + slices] += probability[:, :extent[0], :extent[1], :extent[2]]
+            count[slices] += 1
+        del chunk, probabilities, logits, output
+        cursor += size
+    if not bool((count > 0).all()):
+        raise RuntimeError("Sliding-window coverage failure")
+    pred = (sums / count[None]).argmax(0).to(torch.uint8).cpu().numpy()
+    del sums, count, volume
+    return restore_full_prediction(pred, meta)
+
+
+def sliding_window_predict_reference(head, meta, node_probs=None, roi=128, overlap=.25):
+    """Original CPU-accumulating implementation, kept as the equivalence reference for tests."""
     import torch
     import torch.nn.functional as F
     from brats_gpu import configure_gpu, bounded_prefetch, predict_batch, _cleanup_cuda
@@ -203,6 +352,18 @@ def make_training_patch(meta, roi=128, node_probs=None, rng=None, tumour_probabi
     CNN-only and graph+CNN use the same coordinates when given the same RNG.
     Validation/test must use sliding_window_predict instead.
     """
+    lo, hi, seg = training_patch_bounds(meta, roi, rng, tumour_probability)
+    slices = tuple(slice(int(l), int(h)) for l, h in zip(lo, hi))
+    x = np.stack([np.asarray(meta["vis"][m], dtype=np.float32)[slices] for m in MODALITY_ORDER])
+    if node_probs is not None:
+        x = np.concatenate((x, probability_window(node_probs, meta, lo, hi)), axis=0)
+    y = seg[slices].astype(np.int64)
+    pads = tuple((0, max(0, 4 - int(n))) for n in y.shape)
+    return np.pad(x, ((0, 0),) + pads), np.pad(y, pads)
+
+
+def training_patch_bounds(meta, roi=128, rng=None, tumour_probability=.5):
+    """Patch corner selection shared by make_training_patch and patch_example (same RNG draws)."""
     rng = np.random if rng is None else rng
     shape = np.asarray(meta["crop_shape"], dtype=int)
     size = np.minimum(shape, roi)
@@ -213,14 +374,47 @@ def make_training_patch(meta, roi=128, node_probs=None, rng=None, tumour_probabi
         lo = np.minimum(np.maximum(centre - size // 2, 0), shape - size)
     else:
         lo = np.array([rng.randint(int(n - s) + 1) for n, s in zip(shape, size)])
-    hi = lo + size
+    return lo, lo + size, seg
+
+
+def patch_example(meta, roi=128, node_probs=None, rng=None, tumour_probability=.5, pin=False):
+    """Compact CPU form of make_training_patch; materialize_examples expands it on the device.
+
+    Carries the stored (float16) MRI window, labels, node maps and node probabilities
+    instead of the dense float32 tensor, so the expensive prior projection runs on the GPU.
+    """
+    import torch
+    lo, hi, seg = training_patch_bounds(meta, roi, rng, tumour_probability)
     slices = tuple(slice(int(l), int(h)) for l, h in zip(lo, hi))
-    x = np.stack([np.asarray(meta["vis"][m], dtype=np.float32)[slices] for m in MODALITY_ORDER])
+    def tensor(array):
+        value = torch.from_numpy(np.ascontiguousarray(array))
+        return value.pin_memory() if pin else value
+    example = dict(vis=tensor(np.stack([np.asarray(meta["vis"][m])[slices] for m in MODALITY_ORDER])),
+                   y=tensor(np.asarray(seg[slices], dtype=np.uint8)), maps=None, probs=None)
     if node_probs is not None:
-        x = np.concatenate((x, probability_window(node_probs, meta, lo, hi)), axis=0)
-    y = seg[slices].astype(np.int64)
-    pads = tuple((0, max(0, 4 - int(n))) for n in y.shape)
-    return np.pad(x, ((0, 0),) + pads), np.pad(y, pads)
+        example["maps"] = [tensor(np.asarray(meta["node_map"][nt])[slices]) for nt in node_probs]
+        example["probs"] = [tensor(np.asarray(p, dtype=np.float32)) for p in node_probs.values()]
+    return example
+
+
+def example_shape(example):
+    return tuple(example["vis"].shape[1:]) if isinstance(example, dict) else tuple(example[0].shape[1:])
+
+
+def materialize_examples(examples, device):
+    """Stack compact patch examples into (x float32, y int64) on the device; equals make_training_patch."""
+    import torch
+    non_blocking = getattr(device, "type", str(device)) == "cuda"
+    xs, ys = [], []
+    for example in examples:
+        x = example["vis"].to(device, non_blocking=non_blocking).float()
+        if example["maps"] is not None:
+            prior = project_probabilities_torch([m.to(device, non_blocking=non_blocking) for m in example["maps"]],
+                                                [p.to(device, non_blocking=non_blocking) for p in example["probs"]])
+            x = torch.cat((x, prior), 0)
+        xs.append(_pad_min4(x))
+        ys.append(_pad_min4(example["y"].to(device, non_blocking=non_blocking).long()))
+    return torch.stack(xs), torch.stack(ys)
 
 
 def audit_dataset(all_paths, modality_kind, output_dir, expected_count=1251, exclusions=(), official_ids=None):

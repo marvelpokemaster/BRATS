@@ -1,9 +1,9 @@
 # Frozen practical study
 
 Main seed: 42. Main subjects: the complete audited Part 1 train/validation/test
-split. Main models: 100-epoch maximum, patience 15, 135-minute phase allowance,
-best completed full-volume validation Dice checkpoint. All comparisons use the
-same declared allowance; achieved epochs and preparation costs can differ.
+split. Main models (convergence protocol v9): 100-epoch maximum, early stopping
+with patience 15, no training-time cap, best completed full-volume validation Dice
+checkpoint. Every row uses the same stopping rule; achieved epochs can differ.
 
 | Row | Training work | Scheduled session |
 |---|---|---|

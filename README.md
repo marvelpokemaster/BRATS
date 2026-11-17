@@ -32,10 +32,10 @@ phases in total: three graph models and three voxel models. Graph-only reuses th
 main graph exactly. GraphSAGE and fixed-hop effects are compared with graph-only
 HGT, rather than attributing an absent CNN's effect to the graph architecture.
 
-Each main phase has a predeclared 135-minute allowance including preparation
-inside that phase and calibration, a 100-epoch maximum and patience 15. Epochs
-can differ across models. This is a comparison under a stated compute budget;
-it is not equal-epoch training or a claim that every baseline has converged.
+Convergence protocol v9: each main phase trains to a 100-epoch maximum with early
+stopping (patience 15) on full-volume validation Dice; there is no training-time
+cap. Epochs can differ across models because each stops by the same rule. A
+session that runs out of time pauses and resumes from its last completed epoch.
 The best complete validation epoch is selected. A partial epoch is discarded.
 `stopping_reason`, actual epoch counts and elapsed time are saved. At least one
 validated epoch is needed for a selectable checkpoint; meeting that minimum does
@@ -102,3 +102,16 @@ is the typed multimodal HGT + bounded learned-hop mixture and its measured
 cost/segmentation/explanation behavior under this stated protocol.
 
 MONAI SegResNet API: https://monai.readthedocs.io/en/1.5.1/networks.html#segresnet
+
+## Advisor follow-up (inference and one CNN stage)
+
+Run after Parts 1-3 and 5 are complete, with all helper `.py` files beside the notebook (see `RUN_NEXT_ADVISOR.md`
+and `Advisor.md`).
+
+| File | Purpose |
+|---|---|
+| `part3b_graphsage_hybrid.py` | GraphSAGE + the same 3D CNN (typed HGT vs homogeneous graph under the same CNN) |
+| `part6_advisor_tests.py` | CNN-error correction analysis, edge perturbation, modality intervention, hop sensitivity |
+| `verify_hub_results_v4.ipynb` | Checks the saved Hugging Face results against the reported numbers |
+
+Fill `HF_TOKEN_PLACEHOLDER` locally only; never commit a token.

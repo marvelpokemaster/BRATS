@@ -21,8 +21,8 @@ def _(mo):
 
     Fresh Part 1 is required. Keep all matching helpers beside the notebook and fill the blank HF token locally.
     15k SLIC, HGT, learned 0–2 extra hops; structural refinement and reconstruction are off.
-    One seed; declared 135-minute model-training allowances, with best completed validation checkpoints.
-    A compute-budget stop is not convergence. See RUN_NEXT.md and ADVISOR_SCOPE.md before running.
+    One seed; convergence protocol v9: no training-time cap, up to 100 epochs per stage, early stopping on validation Dice (patience 15), best-validation checkpoint kept.
+    A session that runs out of time saves its last completed epoch; rerun the same notebook to resume. See RUN_NEXT.md and ADVISOR_SCOPE.md before running.
     Session work stops at 9.5 hours to reserve time for ZIP transfer. Individual operations/transfers are not preemptible.
     """)
     return
@@ -155,10 +155,10 @@ def _():
     REQUIRE_CUDA = True
     GPU_PRECISION = "auto"  # BF16 on supported CUDA GPUs; FP32 on CPU helpers.
     GPU_AUTOTUNE = True
-    GPU_MEMORY_FRACTION = 0.70
+    GPU_MEMORY_FRACTION = 0.85
     VOXEL_EFFECTIVE_BATCH_SIZE = 16
-    VOXEL_MAX_MICROBATCH = 4
-    INFERENCE_MAX_BATCH = 8
+    VOXEL_MAX_MICROBATCH = 16  # whole effective batch in one GPU pass when it fits (same optimizer updates)
+    INFERENCE_MAX_BATCH = 16
     VOXEL_PREFETCH_WORKERS = 12
     from huggingface_hub import get_token as _get_hf_token_early
     if HF_REQUIRED and not ((os.environ.get("HF_TOKEN") or "").strip() or (_get_hf_token_early() or "").strip() or HF_TOKEN_PLACEHOLDER.strip()):
@@ -221,7 +221,7 @@ def _():
     SEED = stage1_checkpoint["run_config"]["identity"]["seed"]
 
     GRAPH_MAX_MICROBATCH = 8
-    GRAPH_MEMORY_FRACTION = 0.75
+    GRAPH_MEMORY_FRACTION = 0.85
 
     import monai as _monai  # Required here and again in a fresh Part 5 session; tested with MONAI 1.5.1.
 
@@ -596,7 +596,7 @@ def _(
     RUN_CONFIG = {
         "identity": IDENTITY_CONFIG,
         "train": {
-            "phase_seconds_limit": 8100, "compute_protocol": "practical-v8",
+            "phase_seconds_limit": None, "compute_protocol": "convergence-v9",
             "graph_training_protocol": "practical-v8-patient-mean",
             "epochs": EPOCHS, "batch_size": BATCH_SIZE, "lr": LR, "weight_decay": WEIGHT_DECAY,
             "dice_weight": DICE_WEIGHT, "et_focal_weight": ET_FOCAL_WEIGHT, "focal_gamma": FOCAL_GAMMA,
@@ -604,7 +604,7 @@ def _(
             "lambda_rec": LAMBDA_REC,
         },
         "voxel": {
-            "phase_seconds_limit": 8100, "compute_protocol": "practical-v8",
+            "phase_seconds_limit": None, "compute_protocol": "convergence-v9",
             "gpu_training_protocol": "v4-patient-mean-ce", "effective_batch_size": VOXEL_EFFECTIVE_BATCH_SIZE,
             "precision_policy": GPU_PRECISION,
             "voxel_epochs": VOXEL_EPOCHS, "voxel_lr": VOXEL_LR,
@@ -1976,7 +1976,7 @@ def _(
         dice = (2.0 * inter + eps) / (den + eps)             # [3, num_graphs]
         return dice.mean(dim=0)                               # per patient
 
-    return focal_loss_soft, region_dice_loss, soft_cross_entropy
+    return focal_loss_soft, node_region_dice, region_dice_loss, soft_cross_entropy
 
 
 @app.cell
@@ -2319,6 +2319,7 @@ def _(
     hf_upload_receipt,
     load_meta,
     mask_hetero_graph,
+    node_region_dice,
     postprocess_prediction_auto,
     project_node_probs,
     rec_lambda,
@@ -2415,6 +2416,7 @@ def _(
         STRUCTURAL_AUX_WEIGHT=STRUCTURAL_AUX_WEIGHT,
         HOP_REG_WEIGHT=HOP_REG_WEIGHT,
         load_meta=load_meta,
+        node_region_dice=node_region_dice,
         postprocess_prediction_auto=postprocess_prediction_auto,
         project_node_probs=project_node_probs,
         LR=LR,
@@ -2454,7 +2456,7 @@ def _(
     if research_status and research_status["scheduled_training_complete"]:
         print("THIS PART COMPLETE: continue to the next numbered part.")
     else:
-        print("INCOMPLETE WITHIN SESSION BUDGET: saved results are preserved. Do not claim the missing comparisons or silently extend the study.")
+        print("PAUSED AT THE SESSION TIME LIMIT: progress is saved at the last completed epoch. Rerun this part in a new session to resume.")
     return
 
 

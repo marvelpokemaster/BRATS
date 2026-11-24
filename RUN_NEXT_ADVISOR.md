@@ -1,6 +1,8 @@
 # Advisor follow-up (Advisor.md, 7 Nov): what to run, in what order
 
-**Status: written and re-verified statically (12 Nov), NOT executed.** The authoring environment had no PyTorch, PyG, marimo,
+**Status (updated 24 Nov 2026): both scripts have since been run on Molab; their results (GraphSAGE+CNN comparison and the Q2/Q3 tests) are in the S7 report.
+The executed Part 6 notebook used `ADV_N_PATIENTS = 30`, while the script in this folder still shows 60: the reported Dice-damage tests use the 30-patient subset.
+Original note, written 12 Nov before the runs: written and re-verified statically, not executed.** The authoring environment had no PyTorch, PyG, marimo,
 GPU or Hugging Face access, so nothing could be run there. Checked: valid Python; marimo DAG rules (AST checker, same result as the
 working Part 5 notebook); the prefix cells match the working Part 5 notebook (52) except for the intended changes; every call into
 the v9 helpers (`ResearchRunner`, `fit_graph`, `fit_voxel`, `train_run`, `evaluate_run`, store `read/save/flush`, metric keys)
@@ -68,4 +70,4 @@ Hugging Face is reused). Neither changes any existing row, split, or result.
 - Revoke the Hugging Face token that appears in the exported notebook (52); notebooks must be exported with the token field blank.
 - Abstract: voxel-stage validation Dice should read 87.66% (0.876649); confirm the quoted test numbers are the post-processed ones from the report JSON.
 - `graphsage_hybrid` is a post-hoc, advisor-requested row with its own Holm family; say so in the paper. Its checkpoint is selected on validation only.
-- The BRATS clone still has 5 unpushed commits; nothing was pushed.
+- (Resolved) The final code was pushed and merged: `marvelpokemaster/BRATS` commit `5476be2`, merged to `main` as `551b1ed`.

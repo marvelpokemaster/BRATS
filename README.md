@@ -1,4 +1,7 @@
-# BraTS practical v8: five Molab sessions
+# BraTS QoS-HRGN: practical study (convergence protocol v9, six rows plus advisor follow-up)
+
+Current project state, rules and roadmap: see `AGENTS.md`. The text below describes the five-session v8 plan; the final runs
+use convergence protocol v9 (see `RUN_NEXT.md`), so where the two differ, `RUN_NEXT.md` and `AGENTS.md` are authoritative.
 
 This replaces the expansive v7 experiment schedule. Start with RUN_NEXT.md.
 The target is five sessions, each at most 12 hours. Work budgets are 9.5 hours

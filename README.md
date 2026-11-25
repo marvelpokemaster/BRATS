@@ -11,7 +11,7 @@ slow uploads can exceed the reserve. Actual validation quality remains unknown.
 
 ## Main method
 
-- 15,000 SLIC regions per T1ce/FLAIR partition; all four MRI modalities in node  features.
+- 15,000 SLIC regions per T1ce/FLAIR partition; all four MRI modalities in node features.
 - HGT with two layers and the existing 128 hidden channels.
 - Learned additional depth mixture over k=0,1,2; fixed shared two-hop control.
 - Structural refinement and masked feature/correspondence reconstruction OFF.

@@ -20,7 +20,7 @@ code of record is `marvelpokemaster/BRATS` commit `5476be2` (merged to `main` as
 * **Correctness over speed.** Never state a number that was not read from a saved result. Do not tune on test results. Single-seed limits apply to every claim.
 * **Marimo rules for any notebook edit:** names starting with `_` are private to their cell; every other global is defined in exactly one cell;
   cross-cell names must be cell parameters and returned by the defining cell. `.ipynb` twins use 0-space indentation.
-  Run `python tools/check_notebook_parity.py <part>` for each part you touch (pass part names one at a time; running it with no argument fails).
+  Run `python tools/check_notebook_parity.py <part>` for each part you touch (pass one or more part names, or none to check all seven parts).
 * **Commit or push only when the owner asks.** Do not edit the original `qos-hrgn-dashboard` folder; all dashboard work goes in `qos-hrgn-dashboard-v2`.
 * **Never mention the AI assistant** in the report, slides, deliverable files or their metadata (owner's standing rule).
 
@@ -75,12 +75,12 @@ If a legacy checkpoint fails to load, investigate rather than assuming those pat
 | `part3_experiments` | `graphsage_backbone`, `fixed_shared_hops`, `segresnet` |
 | `part4_slic_study` | 5k/10k/15k/20k SLIC pilot (64 train / 16 val patients, one seed, max 20 epochs) |
 | `part5_reports` | held-out test evaluation, Shapley XAI, final reports export |
-| `part3b_graphsage_hybrid.py` | follow-up: GraphSAGE + CNN row (post-hoc, advisor-requested; own Holm family). **No `.ipynb` twin.** |
-| `part6_advisor_tests.py` | follow-up: CNN-error correction (Q2) and faithfulness tests 3a/3b/3c. **No `.ipynb` twin.** |
+| `part3b_graphsage_hybrid.py` | follow-up: GraphSAGE + CNN row (post-hoc, advisor-requested; own Holm family). `.ipynb` twin added 24 Nov. |
+| `part6_advisor_tests.py` | follow-up: CNN-error correction (Q2) and faithfulness tests 3a/3b/3c. `.ipynb` twin added 24 Nov. |
 | `verify_hub_results_v4.ipynb` | verifies the six rows on the Hub (checks 875/187/189 split, 189 patients per row, no duplicates) |
 | `preflight_v9.ipynb` | tests and helper-file check before any run (`PREFLIGHT PASSED`) |
 | `brats_*.py` (9 helpers), `baseline_3d_unet.py` | shared code; upload all helpers together |
-| `tests/`, `tools/` | regression tests; notebook parity checker (supports parts 1-5 only) |
+| `tests/`, `tools/` | regression tests; notebook parity checker (all seven parts; no argument checks all) |
 | `RUN_NEXT.md`, `RUN_NEXT_ADVISOR.md`, `RESEARCH_PLAN.md`, `RESEARCH_PROTOCOL.md`, `ADVISOR_SCOPE.md`, `Advisor.md` | run order, study design, advisor requirements |
 | `SHA256SUMS.json`, `source_provenance.json` | integrity and provenance records |
 
@@ -121,7 +121,7 @@ Status key: DONE / OPEN. Priorities: P0 do first, P1 soon, P2 science that stren
 * A-done-2: Convergence protocol v9 runs for all six rows (Parts 1, 2, 3, 5); final reports exported and on the Hub.
 * A-done-3: SLIC resolution pilot (Part 4, carried over from v8), reported separately as preliminary evidence.
 * A-done-4: Advisor follow-up: GraphSAGE+CNN row (`part3b`) and Q2/Q3 tests (`part6`); results are in the report.
-* A-done-5: Verification notebook, parity checks (5/5 parts, 0 mismatches), regression tests present.
+* A-done-5: Verification notebook, parity checks (now 7/7 parts, 0 mismatches, after D1), regression tests present.
 * A-done-6: S7 report (45 pages: PDF, Word, source zip) and deck v7; literature table cross-checked against the papers (HGT range corrected to 9-21%, nnU-Net batch-size claim removed, GraphSAGE metric set to micro-F1).
 * A-done-7: Code pushed and merged: `marvelpokemaster/BRATS` `5476be2` -> `main` `551b1ed`.
 * A-done-9: P1 doc and test items cleared on 24 Nov: stale status text fixed in `README.md` and `RUN_NEXT_ADVISOR.md` (and the `README.md` entry in `SHA256SUMS.json` refreshed, 32/32 checksums match); the 30-vs-60 patient setting confirmed from the executed notebook (the run used 30, the repo script still says 60; reported results use 30, so the script was left unchanged to keep it identical to commit `5476be2`); and a fresh clone of the dashboard `main` loaded all 8 tabs with 0 failed requests, 0 console errors and no broken images (headless browser test).
@@ -138,6 +138,8 @@ Status key: DONE / OPEN. Priorities: P0 do first, P1 soon, P2 science that stren
 
 **P1: soon**
 * B7. Done (24 Nov 2026): dashboard v2 per-patient GraphSAGE+CNN update and training curve tile pushed, merged, and local files checked identical to GitHub `main`.
+
+* **B9. Push `.gitignore` fix and the missing curve image** to `marvelpokemaster/qos-hrgn-dashboard`: in `dash_push` copy v2 `.gitignore`, `README.md` and `data\extracted\research\reports\curves\graphsage_cnn.png`, `git add` them (the png needs the new `.gitignore`), commit, push, PR, merge. Check with `git ls-files data/extracted/research/reports/curves/graphsage_cnn.png`.
 
 **P2: strengthens the paper**
 * C1. Repeat main rows with at least 3 seeds (current claims are single-seed, one split).
@@ -156,11 +158,10 @@ Status key: DONE / OPEN. Priorities: P0 do first, P1 soon, P2 science that stren
   the +1.28 vs +1.78 ET gain difference is now explained (see section 5).
 
 **P3: repo hygiene**
-* D1. Add `.ipynb` twins for `part3b` and `part6`, and extend `tools/check_notebook_parity.py` (it only accepts parts 1-5; it also fails when run with no arguments).
+* D1. Done (24 Nov 2026): `.ipynb` twins generated for `part3b` and `part6`, parity tool covers all seven parts and no longer fails with no argument; 0 mismatches. Needs a commit and push (new files `part3b_graphsage_hybrid.ipynb`, `part6_advisor_tests.ipynb`, changed `tools/check_notebook_parity.py`). Twins were not run in Jupyter, only checked for syntax and cell parity.
 * D2. `Aczr005/BRATS` was the fork used for PR #6 (`final-submission` branch), which is merged into `marvelpokemaster/BRATS` `main`. Confirm the fork holds nothing that `main` lacks; the report cites only the marvelpokemaster repo.
 * D3. Regenerate `SHA256SUMS.json` and `source_provenance.json` after any code change.
-* D4. Dashboard repo: `data/extracted` is already tracked on `main` (277 files, 26 PNGs) even though v2's `.gitignore` lists it, so the ignore rule does nothing for those files.
-  Decide whether to keep them tracked (fresh clones work without extraction) or untrack them (`git rm -r --cached data/extracted`); the README run instructions must match the choice.
+* D4. Decided 25 Nov 2026: keep `data/extracted` tracked (fresh clones work without extraction). The `data/extracted/` line is removed from v2's `.gitignore` and the README says the figures are tracked. **Open follow-up (B9):** the ignore rule was still active when the 24 Nov dashboard update was committed, so the new curve image `data/extracted/research/reports/curves/graphsage_cnn.png` may not have been committed; check the repo and push it (see B9).
 * D5. Delete or archive the local clone `qos-hrgn-dashboard-v2\dash_push` once it is no longer needed (it sits inside the v2 folder, which is easy to copy by mistake).
 * D6. Optional: host the dashboard (`vercel.json` exists) so there is a live demo link as well as the repo.
 
@@ -173,6 +174,8 @@ Status key: DONE / OPEN. Priorities: P0 do first, P1 soon, P2 science that stren
 
 ## 8. Change log
 
+* 25 Nov 2026 (D4 decided): keep `data/extracted` tracked; removed the ignore rule from dashboard v2 `.gitignore` (backup in `Brats new\v2_backup_24Nov`), added a README note, and opened B9 because `git check-ignore` shows the new curve PNG was ignored in the `dash_push` clone, so the 24 Nov push probably lacked it.
+* 24 Nov 2026 (D1 done): generated `part3b_graphsage_hybrid.ipynb` and `part6_advisor_tests.ipynb` from the `.py` sources (generator kept in `Brats new\twin_tool\make_twin.py`, validated by regenerating part5's cells), extended and fixed `tools/check_notebook_parity.py` (7 parts, no-argument run works). Backups: `Downloads\tools_before_D1_backup`, `AGENTS_before_D1_backup.md`. `SHA256SUMS.json` does not list these files, so it is unchanged.
 * 24 Nov 2026 (B7 done): pushed and merged the dashboard v2 update (per-patient GraphSAGE+CNN rows, paired stats, ET note, curve tile); confirmed local files identical to the repo. P1 is now empty.
 * 24 Nov 2026 (B8 done): the Hub `runs/graphsage_hybrid/seed_42/trained.json` holds per-epoch history (graph 88 epochs, early stopping, best epoch 73; voxel 100 epochs, epoch cap, best epoch 86). Drew `graphsage_cnn.png` in the existing tile style (training objective and full-volume validation Dice, both stages), registered it under `images.curves` (idempotent step `register_curve` in `add_graphsage_cnn_patients.py`) and verified it is served. Local in dashboard v2 only; goes out with B7.
 * 24 Nov 2026 (curves): added `--find` and `--get` options to `pull_followup_from_hub.py` and opened item B8 (GraphSAGE+CNN training curve).

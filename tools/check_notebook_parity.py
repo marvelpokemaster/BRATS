@@ -14,6 +14,8 @@ DEFAULT_PARTS = (
     "part3_experiments",
     "part4_slic_study",
     "part5_reports",
+    "part3b_graphsage_hybrid",
+    "part6_advisor_tests",
 )
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -139,9 +141,13 @@ def check_part(part):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("parts", nargs="*", choices=DEFAULT_PARTS, default=DEFAULT_PARTS)
+    parser.add_argument("parts", nargs="*", metavar="PART", help="one or more of: " + ", ".join(DEFAULT_PARTS) + " (default: all)")
     args = parser.parse_args()
-    mismatches = sum(check_part(part) for part in args.parts)
+    unknown = [part for part in args.parts if part not in DEFAULT_PARTS]
+    if unknown:
+        parser.error("unknown part(s): " + ", ".join(unknown))
+    parts = args.parts or list(DEFAULT_PARTS)
+    mismatches = sum(check_part(part) for part in parts)
     return int(bool(mismatches))
 
 

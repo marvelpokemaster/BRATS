@@ -1,13 +1,13 @@
 # AGENTS.md: QoS-HRGN (BraTS 2021) project state, rules and roadmap
 
-**Last verified: 24 Nov 2026 (re-checked in the evening against GitHub and the laptop).** Settings below were checked against the code in this folder, not copied from older notes.
+**Last verified: 26 Nov 2026 (code and docs re-checked against the BRATS_repo clone and `upstream/main`; dashboard repo not re-checked, see B9).** Settings below were checked against the code in this folder, not copied from older notes.
 Read this file first, then `AGENT_GUIDELINES.md` (marimo rules). Do not revert anything in section 3 without the owner's permission.
 
 Project: QoS-HRGN, brain-tumour segmentation on BraTS 2021 (1,251 patients; split 875 train / 187 val / 189 test, seed 42).
 Pipeline: SLIC supervoxels (15,000 per modality, T1ce + FLAIR) -> typed hetero-graph (3 relations) -> 2 HGT layers (4 heads, hidden 128)
 -> gated adaptive propagation (K_MAX = 2, learned per-node hop mixture) -> voxel projection -> 3D CNN refinement -> ET island cut (< 300 voxels).
 Team: Adarsh Binu, Pranav Pradeep, Sharoon Joseph, Sourav Sasiraj. Guide: Ms. Asha Ashok. Stage: S7 final review was completed on 18 Nov 2026 (report and deck are done and out of scope for further work);
-code of record is `marvelpokemaster/BRATS` commit `5476be2` (merged to `main` as `551b1ed`).
+code of record is `marvelpokemaster/BRATS` commit `5476be2` (merged to `main` as `551b1ed`; `main` is now `cdbbe4b` after PR #7 (docs commit `4862726`) and PR #8 (notebook twins, parity checker, README fix; commit `951522f`)).
 
 ---
 
@@ -137,7 +137,7 @@ Status key: DONE / OPEN. Priorities: P0 do first, P1 soon, P2 science that stren
   Do not push the HTML exports anywhere. The owner is handling this; it cannot be verified from here.
 
 **P1: soon**
-* B7. Done (24 Nov 2026): dashboard v2 per-patient GraphSAGE+CNN update and training curve tile pushed, merged, and local files checked identical to GitHub `main`.
+* B7. Done except one file (24 Nov 2026): dashboard v2 per-patient GraphSAGE+CNN update pushed and merged. The new curve image was probably not included, see B9 (open).
 
 * **B9. Push `.gitignore` fix and the missing curve image** to `marvelpokemaster/qos-hrgn-dashboard`: in `dash_push` copy v2 `.gitignore`, `README.md` and `data\extracted\research\reports\curves\graphsage_cnn.png`, `git add` them (the png needs the new `.gitignore`), commit, push, PR, merge. Check with `git ls-files data/extracted/research/reports/curves/graphsage_cnn.png`.
 
@@ -158,8 +158,8 @@ Status key: DONE / OPEN. Priorities: P0 do first, P1 soon, P2 science that stren
   the +1.28 vs +1.78 ET gain difference is now explained (see section 5).
 
 **P3: repo hygiene**
-* D1. Done (24 Nov 2026): `.ipynb` twins generated for `part3b` and `part6`, parity tool covers all seven parts and no longer fails with no argument; 0 mismatches. Needs a commit and push (new files `part3b_graphsage_hybrid.ipynb`, `part6_advisor_tests.ipynb`, changed `tools/check_notebook_parity.py`). Twins were not run in Jupyter, only checked for syntax and cell parity.
-* D2. `Aczr005/BRATS` was the fork used for PR #6 (`final-submission` branch), which is merged into `marvelpokemaster/BRATS` `main`. Confirm the fork holds nothing that `main` lacks; the report cites only the marvelpokemaster repo.
+* D1. Done (26 Nov 2026): `.ipynb` twins for `part3b` and `part6` and the 7-part parity checker are merged into `marvelpokemaster/BRATS` `main` via PR #8 (`cdbbe4b`); parity shows 0 mismatches on all 7 parts. Twins were not run in Jupyter, only checked for syntax and cell parity.
+* D2. Done (25 Nov 2026): the fork `Aczr005/BRATS` `final-submission` holds no commits that `main` lacks; its only file difference is one whitespace fix in `README.md` (single space in "node features"), which the D1 push carries into `main`.
 * D3. Regenerate `SHA256SUMS.json` and `source_provenance.json` after any code change.
 * D4. Decided 25 Nov 2026: keep `data/extracted` tracked (fresh clones work without extraction). The `data/extracted/` line is removed from v2's `.gitignore` and the README says the figures are tracked. **Open follow-up (B9):** the ignore rule was still active when the 24 Nov dashboard update was committed, so the new curve image `data/extracted/research/reports/curves/graphsage_cnn.png` may not have been committed; check the repo and push it (see B9).
 * D5. Delete or archive the local clone `qos-hrgn-dashboard-v2\dash_push` once it is no longer needed (it sits inside the v2 folder, which is easy to copy by mistake).
@@ -174,6 +174,8 @@ Status key: DONE / OPEN. Priorities: P0 do first, P1 soon, P2 science that stren
 
 ## 8. Change log
 
+* 26 Nov 2026 (PR #8 merged): D1 pushed and merged, `main` = `cdbbe4b`. This file was then synced to `main` with a docs-only PR (branch `docs-agents-sync`). Backup: `Downloads\AGENTS_before_PR8_sync_backup.md`.
+* 25 Nov 2026 (sync): PR #7 (docs commit `4862726`) is merged, `main` = `eb31faa`; D2 closed (fork differs only by a README whitespace fix); D1 code verified but its push is still open; B9 still open. AGENTS.md here is newer than the copy on `main`; push it with D1. Backup: `Downloads\AGENTS_before_25Nov_sync_backup.md`.
 * 25 Nov 2026 (D4 decided): keep `data/extracted` tracked; removed the ignore rule from dashboard v2 `.gitignore` (backup in `Brats new\v2_backup_24Nov`), added a README note, and opened B9 because `git check-ignore` shows the new curve PNG was ignored in the `dash_push` clone, so the 24 Nov push probably lacked it.
 * 24 Nov 2026 (D1 done): generated `part3b_graphsage_hybrid.ipynb` and `part6_advisor_tests.ipynb` from the `.py` sources (generator kept in `Brats new\twin_tool\make_twin.py`, validated by regenerating part5's cells), extended and fixed `tools/check_notebook_parity.py` (7 parts, no-argument run works). Backups: `Downloads\tools_before_D1_backup`, `AGENTS_before_D1_backup.md`. `SHA256SUMS.json` does not list these files, so it is unchanged.
 * 24 Nov 2026 (B7 done): pushed and merged the dashboard v2 update (per-patient GraphSAGE+CNN rows, paired stats, ET note, curve tile); confirmed local files identical to the repo. P1 is now empty.
